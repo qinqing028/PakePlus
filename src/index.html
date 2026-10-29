@@ -1765,7 +1765,17 @@ async function fetchCirculatingShares(symbol) {
     const buf = await resp.arrayBuffer();
     let text; try { text = new TextDecoder('gbk').decode(buf); } catch (e) { text = new TextDecoder('utf-8').decode(buf); }
     const match = text.match(/"([^"]+)"/); if (!match) return 0;
-    const parts = match[1].split('~'); const currentPrice = parseFloat(parts[3]); const circMarketCapYi = parseFloat(parts[44]);
+    const parts = match[1].split('~');
+    // 顺便缓存股票中文名（离线时补全用）
+    const stockName = (parts[1] || '').trim();
+    if (stockName) {
+      try {
+        const nameMap = JSON.parse(localStorage.getItem('stockNameMap') || '{}');
+        nameMap[symbol] = stockName;
+        localStorage.setItem('stockNameMap', JSON.stringify(nameMap));
+      } catch (e) {}
+    }
+    const currentPrice = parseFloat(parts[3]); const circMarketCapYi = parseFloat(parts[44]);
     if (currentPrice > 0 && circMarketCapYi > 0) return circMarketCapYi * 1e8 / currentPrice;
     const circSharesWan = parseFloat(parts[45]); if (circSharesWan > 0) return circSharesWan * 10000;
     return 0;
@@ -2429,6 +2439,13 @@ async function loadStock(code, name) {
   if (!name || name === code || /^\d{6}$/.test(String(name))) {
     const hit = STOCK_BY_CODE[code];
     if (hit && hit.name) name = hit.name;
+    else {
+      try {
+        const nameMap = JSON.parse(localStorage.getItem('stockNameMap') || '{}');
+        const symbol = getSymbolWithPrefix(code);
+        if (nameMap[symbol]) name = nameMap[symbol];
+      } catch (e) {}
+    }
   }
   currentPeriod = 'day'; minuteData = null; futureBars = [];
   cursorIndex = -1; clickedIndex = -1; _lastInfoIdx = -1; _lastInfoBoxKey = '';
@@ -2538,6 +2555,7 @@ function layoutChart() {
 }
 let _layoutTimer = null;
 window.addEventListener('resize', () => { clearTimeout(_layoutTimer); _layoutTimer = setTimeout(() => { layoutChart(); }, 150); });
+
 // ============================================================
 // 策略示例 / 保存 / 渲染 / 编辑 / 下拉 / 手动解析
 // ============================================================
@@ -2614,6 +2632,8 @@ function renderSuggestSellStrategies() {
   listEl.querySelectorAll('.suggest-chip').forEach(chip => { chip.addEventListener('click', () => { const id = chip.dataset.id; const strategy = SUGGEST_SELL_STRATEGIES.find(s => s.id === id); if (!strategy || selectedSellStrategies.some(s => s.id === id)) return; selectedSellStrategies.push(JSON.parse(JSON.stringify(strategy))); saveSellStrategies(); renderSuggestSellStrategies(); }); });
 }
 
+// 策略下拉 / 编辑 / 手动解析 / 候选检测 / 协同 / 吸收 / 未来信号 / 执行
+// （第 4 段接续）
 // ============================================================
 // 策略下拉
 // ============================================================
@@ -2958,6 +2978,7 @@ document.getElementById('addManualSellStrategyBtn').addEventListener('click', ()
 strategySelectBtn.addEventListener('click', (e) => { e.stopPropagation(); strategySelectDropdown.classList.toggle('show'); if (strategySelectDropdown.classList.contains('show')) renderStrategySelect(); });
 sellStrategySelectBtn.addEventListener('click', (e) => { e.stopPropagation(); sellStrategySelectDropdown.classList.toggle('show'); if (sellStrategySelectDropdown.classList.contains('show')) renderSellStrategySelect(); });
 document.addEventListener('click', (e) => { if (!strategySelectBtn.contains(e.target) && !strategySelectDropdown.contains(e.target)) strategySelectDropdown.classList.remove('show'); if (!sellStrategySelectBtn.contains(e.target) && !sellStrategySelectDropdown.contains(e.target)) sellStrategySelectDropdown.classList.remove('show'); });
+
 // ============================================================
 // 候选买点检测
 // ============================================================
@@ -3398,7 +3419,7 @@ document.getElementById('executeStrategyBtn').addEventListener('click', () => {
 });
 
 // ============================================================
-// 统计
+// 统计 / AI / 设置 / 实盘 / 搜索 UI / 键盘 / 周期 / 推荐 / 实时 / 初始化
 // ============================================================
 let _statStyleInjected = false;
 function ensureStatStyle() {
@@ -3441,10 +3462,6 @@ function showStatPage(trades, initialCapital, finalCapital, openPositions, perio
   statOverlayContent.innerHTML = contentHtml; statOverlay.style.display = 'block'; statOverlay.scrollTop = 0;
   if (statOverlayCloseBtn) { statOverlayCloseBtn.onclick = () => { statOverlay.style.display = 'none'; try { layoutChart(); } catch (e) {} try { if (typeof myChart !== 'undefined' && myChart) myChart.resize(); } catch (e) {} }; }
 }
-
-// ============================================================
-// AI 分析
-// ============================================================
 function openAiModal() { if (!lastStatResult) { alert('【请先统计收益】\n\n请先点击「统计」按钮生成交易数据，再点击「AI分析」。'); return; } aiModal.classList.add('show'); renderAiSummaryBar(); document.getElementById('aiContent').innerHTML = '<div class="ai-placeholder">点击下方「开始分析」按钮，AI 将结合本次交易数据从整体表现、策略优缺点、风险提示、改进建议、评级等维度进行专业分析。</div>'; document.getElementById('aiErrorBox').style.display = 'none'; document.getElementById('aiRunBtn').disabled = false; document.getElementById('aiRunBtn').textContent = '开始分析'; }
 function renderAiSummaryBar() { const d = lastStatResult; if (!d) return; const bar = document.getElementById('aiSummaryBar'); bar.innerHTML = '<div class="ai-summary-item"><span class="label">股票:</span><span class="value">' + (d.meta.stockName || '-') + '</span></div><div class="ai-summary-item"><span class="label">周期:</span><span class="value">' + (d.periodLabel || '-') + '</span></div><div class="ai-summary-item"><span class="label">交易:</span><span class="value">' + d.trades.length + ' 笔</span></div><div class="ai-summary-item"><span class="label">总收益:</span><span class="value">' + d.totalReturnPct + '%</span></div><div class="ai-summary-item"><span class="label">持仓:</span><span class="value">' + d.openPositions.length + ' 笔</span></div>'; }
 function renderMarkdown(text) {
@@ -3491,10 +3508,6 @@ document.getElementById('aiRunBtn').addEventListener('click', async () => {
   if (!result.ok) { const errPrefix = getAiErrorPrefix(result.code); alert('【AI 分析失败 - ' + errPrefix + '】\n\n' + result.message); contentEl.innerHTML = '<div class="ai-placeholder">分析失败，请查看下方错误信息。</div>'; errorEl.style.display = 'block'; errorEl.textContent = '错误详情：' + result.message; btn.textContent = '重新分析'; return; }
   contentEl.innerHTML = renderMarkdown(result.content); btn.textContent = '重新分析';
 });
-
-// ============================================================
-// 设置 / 实盘
-// ============================================================
 document.getElementById('settingsBtn').addEventListener('click', () => {
   const cur = chartSettings;
   document.getElementById('setMa1').value = cur.maPeriods[0]; document.getElementById('setMa2').value = cur.maPeriods[1]; document.getElementById('setMa3').value = cur.maPeriods[2]; document.getElementById('setMa4').value = cur.maPeriods[3];
@@ -3552,29 +3565,20 @@ document.getElementById('liveSaveBtn').addEventListener('click', () => {
   }
   saveSignalsToStorage(currentCode, buySignals, sellSignals); liveModal.classList.remove('show'); renderChart(true, false);
 });
-
-// ============================================================
-// 副图切换 / 搜索 UI / 键盘 / 周期
-// ============================================================
 subIndicatorSelect.addEventListener('change', () => { subIndicator = subIndicatorSelect.value; _renderKlineChart._indicatorMeta = null; if (subIndicator === 'kdj') clearIndicatorCacheByType('kdj'); else if (subIndicator === 'macd') clearIndicatorCacheByType('macd'); else if (subIndicator === 'rsi') clearIndicatorCacheByType('rsi'); else if (subIndicator === 'boll') clearIndicatorCacheByType('boll'); renderChart(true, true); statusEl.innerHTML = '<span class="badge green">副图指标: ' + subIndicator.toUpperCase() + '</span>'; });
-
 function openSearchPanel() { floatingSearchToggle.style.display = 'none'; floatingSearchPanel.classList.add('show'); floatingSearchInput.focus(); floatingSuggest.classList.remove('show'); }
 function closeSearchPanel() { floatingSearchPanel.classList.remove('show'); floatingSuggest.classList.remove('show'); floatingSearchToggle.style.display = 'flex'; floatingSearchInput.value = ''; }
 floatingSearchToggle.addEventListener('click', openSearchPanel); closeSearchBtn.addEventListener('click', closeSearchPanel);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && floatingSearchPanel.classList.contains('show')) closeSearchPanel(); });
-let _suggestRunToken = 0;
 async function showFloatingSuggest(keyword) {
   const kw = String(keyword || '').trim();
   if (!kw) { floatingSuggest.classList.remove('show'); return; }
   const results = searchStocksLocal(kw);
   if (!results || results.length === 0) {
-    // 6 位代码未收录：直接给一条“直接加载”的选项
     if (/^\d{6}$/.test(kw)) {
       floatingSuggest.innerHTML = '<div class="suggest-item" data-code="' + kw + '" data-name="' + kw + '"><span>' + kw + ' <span class="pinyin">直接加载</span></span><span class="code">' + (kw.startsWith('6') ? 'SH' : (kw.startsWith('4') || kw.startsWith('8') ? 'BJ' : 'SZ')) + kw + '</span></div>';
       floatingSuggest.classList.add('show');
-      floatingSuggest.querySelector('.suggest-item').addEventListener('click', () => {
-        floatingSearchInput.value = kw; floatingSuggest.classList.remove('show'); loadStock(kw, kw); closeSearchPanel();
-      });
+      floatingSuggest.querySelector('.suggest-item').addEventListener('click', () => { floatingSearchInput.value = kw; floatingSuggest.classList.remove('show'); loadStock(kw, kw); closeSearchPanel(); });
       return;
     }
     floatingSuggest.innerHTML = '<div class="suggest-empty">未找到匹配股票</div>';
@@ -3586,25 +3590,15 @@ async function showFloatingSuggest(keyword) {
 }
 let _searchDebounceTimer = null;
 floatingSearchInput.addEventListener('input', (e) => { clearTimeout(_searchDebounceTimer); const v = e.target.value.trim(); _searchDebounceTimer = setTimeout(() => showFloatingSuggest(v), 150); });
-
-
 floatingSearchInput.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return; e.preventDefault();
   const raw = floatingSearchInput.value.trim(); if (!raw) return;
   floatingSuggest.classList.remove('show');
-  // 6 位代码：无论是否在内置列表，都直接加载（名称未收录时显示代码）
-  if (/^\d{6}$/.test(raw)) {
-    const hit = STOCK_BY_CODE[raw];
-    loadStock(raw, hit ? hit.name : raw);
-    closeSearchPanel();
-    return;
-  }
-  // 名称/拼音：从内置列表匹配
+  if (/^\d{6}$/.test(raw)) { const hit = STOCK_BY_CODE[raw]; loadStock(raw, hit ? hit.name : raw); closeSearchPanel(); return; }
   const results = searchStocksLocal(raw);
   if (results.length > 0) { loadStock(results[0].code, results[0].name); closeSearchPanel(); } else { statusEl.innerHTML = '<span class="badge orange">未找到匹配股票</span> 可直接输入 6 位代码加载'; }
 });
 document.addEventListener('click', (e) => { if (!e.target.closest('.floating-search-panel') && !e.target.closest('.floating-suggest')) floatingSuggest.classList.remove('show'); });
-
 let _kbdHeldKey = null, _kbdHoldStart = 0, _kbdInterval = null, _kbdFirstDelayTimer = null;
 function getKbdSpeed(holdMs) { if (holdMs < 300) return 1; if (holdMs < 800) return 3; return 8; }
 function moveCursorBy(key, step) {
@@ -3626,7 +3620,6 @@ function stopKbdHold() { _kbdHeldKey = null; _kbdHoldStart = 0; if (_kbdFirstDel
 document.addEventListener('keydown', (e) => { const tag = document.activeElement?.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA') return; if (floatingSearchPanel.classList.contains('show')) return; if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) return; if (currentPeriod === 'minute' || !dataLoaded) return; e.preventDefault(); if (_kbdHeldKey === e.key) return; startKbdHold(e.key); });
 document.addEventListener('keyup', (e) => { if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) return; if (_kbdHeldKey === e.key) stopKbdHold(); });
 window.addEventListener('blur', () => { stopKbdHold(); });
-
 async function switchPeriod(period) {
   currentPeriod = period; _renderKlineChart._structuralKey = null; _renderKlineChart._indicatorMeta = null; cursorIndex = -1; clickedIndex = -1; _lastInfoIdx = -1; _lastInfoBoxKey = ''; _periodCache.period = null; _periodCache.lastTotal = 0;
   document.querySelectorAll('.period-group button').forEach(b => b.classList.remove('active'));
@@ -3676,10 +3669,6 @@ function autoApplyLastReviewStrategies() {
   statusEl.innerHTML += ' <span class="badge cyan">自动补全新增K线信号 ' + newBuys.length + ' 买 / ' + newSells.length + ' 卖' + (synergyOpts ? ' (协同' + (synergyBreak > 0 ? '，补偿冷静期 ' + synergyBreak + ' 次' : '') + ')' : '') + '</span>';
   renderChart(true, false);
 }
-
-// ============================================================
-// 推荐
-// ============================================================
 let _lastRecommendRows = []; let _recommendMode = '1v1';
 let _recommendRunToken = 0;
 function getStrategyLabelById(id, isSell) { const arr = isSell ? selectedSellStrategies : selectedStrategies; const s = arr.find(x => x.id === id); return s ? s.name : id; }
@@ -3746,10 +3735,6 @@ document.getElementById('recommendBtn').addEventListener('click', openRecommendM
 document.getElementById('recommendModalClose').addEventListener('click', () => document.getElementById('recommendModal').classList.remove('show'));
 document.getElementById('recommendCancelBtn').addEventListener('click', () => document.getElementById('recommendModal').classList.remove('show'));
 document.getElementById('recommendModal').addEventListener('click', (e) => { if (e.target === document.getElementById('recommendModal')) document.getElementById('recommendModal').classList.remove('show'); });
-
-// ============================================================
-// 实时 / 其他按钮 / 初始化
-// ============================================================
 let _realtimeTimer = null, _lastRealtimeUpdateTime = 0, _realtimeUpdateInProgress = false;
 function isTradingTime() { const now = new Date(); const day = now.getDay(); if (day === 0 || day === 6) return false; const t = now.getHours() * 100 + now.getMinutes(); return (t >= 915 && t <= 1130) || (t >= 1300 && t <= 1500); }
 async function updateTodayBarFromMinute(silent) {
@@ -3779,7 +3764,6 @@ document.getElementById('forceRefreshBtn').addEventListener('click', async () =>
   currentZoom.start = savedZoom.start; currentZoom.end = savedZoom.end; renderChart(true, true); lockZoom(savedZoom.start, savedZoom.end, 800);
   if (navigator.onLine) setTimeout(() => updateTodayBarFromMinute(true), 500);
 });
-
 (async function init() {
   const log = (msg) => { try { statusEl.innerHTML = '<span class="badge blue">' + msg + '</span>'; } catch(e) {} };
   log('检查 ECharts...');
