@@ -114,16 +114,13 @@ h2 small{font-size:.78rem;color:#7a8b9e;font-weight:400}
 .sub-indicator-select:hover{border-color:#d4a017}
 .signal-panel{margin-top:8px;background:#0a0e14;border-radius:12px;padding:10px 14px;box-shadow:inset 0 2px 6px rgba(0,0,0,.6);display:flex;flex-wrap:wrap;gap:10px;align-items:center;min-height:56px}
 .signal-panel .signal-card{display:flex;align-items:center;gap:8px;padding:8px 14px;background:#14181f;border-radius:20px;border:1px solid #2a3340;font-size:.82rem}
-.signal-panel .signal-card.active-buy{background:#322414;border-color:#d4a017;animation:signalPulseBuy 1.5s infinite}
-.signal-panel .signal-card.active-sell{background:#3a2020;border-color:#ef5350;animation:signalPulseSell 1.5s infinite}
+.signal-panel .signal-card.active-buy{background:#322414;border-color:#d4a017}
+.signal-panel .signal-card.active-sell{background:#3a2020;border-color:#ef5350}
 .signal-panel .signal-card.live{border-color:#00bcd4}
-@keyframes signalPulseBuy { 0%,100%{box-shadow:0 0 8px rgba(212,160,23,.4)} 50%{box-shadow:0 0 20px rgba(212,160,23,.9)} }
-@keyframes signalPulseSell { 0%,100%{box-shadow:0 0 8px rgba(239,83,80,.4)} 50%{box-shadow:0 0 20px rgba(239,83,80,.9)} }
 .signal-panel .signal-card .label{color:#7a8b9e;font-size:.72rem}
 .signal-panel .signal-card .value{color:#e6edf3;font-weight:600}
 .signal-panel .signal-card.active-buy .value{color:#d4a017}
 .signal-panel .signal-card.active-sell .value{color:#ef5350}
-.signal-panel .signal-icon{font-size:1.4rem}
 .signal-panel .empty-signal{color:#6e7e8f;font-size:.78rem;font-style:italic;padding:6px 0}
 .aux-panel{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:6px;padding:8px 14px;background:#0a0e14;border-radius:32px;box-shadow:inset 0 2px 6px rgba(0,0,0,.6),0 4px 8px rgba(0,0,0,.3);justify-content:flex-start}
 .aux-panel button{padding:7px 14px;font-size:.8rem}
@@ -623,12 +620,18 @@ let currentStockShares = 0;
 // 成交量单位换算：腾讯接口主板/创业板为「手」(100股)，科创板返回「股」。currentVolumeFactor = 每单位对应的股数
 let currentVolumeFactor = 100;
 // 做T（日内高抛低吸）状态：买卖标记随时间增量自动添加
-const T_TRADE_CONFIG = { minSpread:2.0, buyDrop:1.0, deepDrop:2.5, stopLoss:1.5, minGapBars:8, noBuyAfter:1450, volSpike:1.1 };
-let tTradeSignals = [];          // { type:'buy'|'sell', idx, time, price, reason, profitPct, ownChg, boardChg, volRatio }
+// 参数按股票类型自适应：getTTradeProfile() 依据板块(10%/20%涨跌幅限制)与近20日振幅动态推导
+const T_TRADE_CONFIG = { minSpread:2.0, buyDrop:1.0, deepDrop:2.5, stopLoss:1.5, minGapBars:8, noBuyAfter:1450, volSpike:1.1, scoreNeed:4, rsiPeriod:14 };
+// 百分比保留 1 位小数（全局工具函数，做T引擎多处复用）
+function r1(v) { return Math.round(v * 10) / 10; }
+let tTradeSignals = [];          // { type:'buy'|'sell', reverse, idx, id, time, price, reason, route, score, fresh, profitPct, ownChg, boardChg, marketChg, volRatio }
 let _tTradeProcessedIdx = 0;     // 已处理到的分时下标（增量）
-let _tTradeOpen = null;          // 当前持仓 { idx, time, price }
+let _tTradeOpen = null;          // 当前持仓 { side:'long'|'short', idx, time, price, targetPct, stopPct, peak }
 let _tTradeState = { symbol:'', date:'' };
+let _tTradeRsiState = { arr:[], init:false, prev:0, ag:0, al:0, gSum:0, lSum:0 }; // 分时分钟级RSI(Wilder)
 let _boardQuoteCache = { key:'', name:'', changePct:0, ts:0 };
+let _marketQuoteCache = { chg:0, ts:0 };                 // 大盘（上证指数）涨跌幅
+let _fundFlowCache = { code:'', net:0, ts:0 };           // 主力资金净流入（元，当日累计）
 let _quoteCache = { symbol:null, data:null, ts:0 };
 let _suppressDataZoomEvent = false;
 let _lockZoomTimer = null, _lockZoomTarget = null;
@@ -1585,94 +1588,355 @@ async function fetchMinuteData(symbol) {
 function resetTTradeState() {
   tTradeSignals = []; _tTradeProcessedIdx = 0; _tTradeOpen = null;
   _tTradeState = { symbol:'', date:'' };
+  _tTradeRsiState = { arr:[], init:false, prev:0, ag:0, al:0, gSum:0, lSum:0 };
   _lastSignalPanelHtml = '';
 }
+// ---- 股票画像：按板块类型 + 近20日平均振幅自适应推导做T参数 ----
+function getTTradeProfile() {
+  const isST = /ST/i.test(currentName || '');
+  const isKcb = /^(688|689)/.test(currentCode);
+  const isCyb = /^(300|301)/.test(currentCode);
+  const limitPct = isST ? 5 : (isKcb || isCyb) ? 20 : 10;
+  let amp = 0;
+  if (rawDailyData && rawDailyData.length >= 6) {
+    const n = Math.min(20, rawDailyData.length - 1);
+    let s = 0, c = 0;
+    for (let k = rawDailyData.length - n; k < rawDailyData.length; k++) {
+      const prev = rawDailyData[k - 1] ? rawDailyData[k - 1].close : rawDailyData[k].open;
+      if (prev > 0) { s += (rawDailyData[k].high - rawDailyData[k].low) / prev * 100; c++; }
+    }
+    amp = c > 0 ? s / c : 0;
+  }
+  if (!(amp > 0)) amp = isKcb ? 5.0 : isCyb ? 4.5 : isST ? 2.0 : 2.8;
+  amp = Math.max(1.2, Math.min(12, amp));
+  const scale = Math.min(2.0, Math.max(0.6, amp / 3.5));
+  let minSpread = Math.min(1.8 * scale, limitPct * 0.35, 6);
+  minSpread = r1(Math.max(0.8, minSpread));
+  const buyDrop = r1(Math.min(3.5, Math.max(0.4, minSpread * 0.55)));
+  const deepDrop = r1(Math.min(limitPct * 0.6, Math.max(0.8, minSpread * 1.35)));
+  const stopLoss = r1(Math.min(limitPct * 0.5, Math.max(0.6, minSpread * 0.8)));
+  const minGapBars = Math.min(16, Math.max(5, Math.round(5 + minSpread * 2.5)));
+  const devThr = r1(Math.min(1.5, Math.max(0.3, minSpread * 0.35)));
+  const volTier = amp >= 5 ? '高波动' : amp >= 3 ? '中波动' : '低波动';
+  const typeLabel = (isST ? 'ST' : isKcb ? '科创板' : isCyb ? '创业板' : '主板') + '·' + volTier;
+  return { typeLabel, amp20: r1(amp), limitPct, minSpread, buyDrop, deepDrop, stopLoss, minGapBars, volSpike: T_TRADE_CONFIG.volSpike, noBuyAfter: T_TRADE_CONFIG.noBuyAfter, devThr, scoreNeed: T_TRADE_CONFIG.scoreNeed };
+}
+// ---- 检测今日趋势强度：强趋势股禁止过早反T ----
+// 返回 { trend:'UP'|'DOWN'|'FLAT', strength:0~3  }
+// strength=3：单边强趋势（连涨/连跌≥3日 + 今日高开方向一致）
+// strength=2：中等趋势（近2日同向 + 今日开盘同向 + 开盘>3%）
+// strength=1：偏弱（单日异动）
+// strength=0：震荡
+function detectTrendStrength() {
+  let upCnt = 0, downCnt = 0, n = 0, bullSurge = 0, bearSurge = 0;
+  if (rawDailyData && rawDailyData.length >= 6) {
+    for (let k = Math.max(0, rawDailyData.length - 4); k < rawDailyData.length; k++) {
+      if (!rawDailyData[k - 1]) continue;
+      const d = (rawDailyData[k].close - rawDailyData[k - 1].close) / rawDailyData[k - 1].close * 100;
+      if (d > 0.5) upCnt++; else if (d < -0.5) downCnt++;
+      if (d >= 5) bullSurge++; else if (d <= -5) bearSurge++;
+      n++;
+    }
+  }
+  const openPct = (minuteData && minuteData.bars.length && minuteData.prevClose > 0)
+    ? (minuteData.bars[0].price - minuteData.prevClose) / minuteData.prevClose * 100 : 0;
+  const isUp = upCnt >= Math.max(2, n - 1) && openPct > 1.5;
+  const isDown = downCnt >= Math.max(2, n - 1) && openPct < -1.5;
+  // "暴涨/暴跌次日"识别：日线虽未满足连涨条件，但近2日有单日≥5%异动
+  // 这种股票次日开盘可能低开（获利盘兑现），但趋势方向不会轻易反转
+  const surgeUp = bullSurge >= 1 && upCnt >= 2 && downCnt <= 1;
+  const surgeDown = bearSurge >= 1 && downCnt >= 2 && upCnt <= 1;
+  let strength = 0, trend = 'FLAT';
+  if (isUp || surgeUp) {
+    trend = 'UP';
+    strength = isUp
+      ? (upCnt >= 3 ? 3 : (openPct > 3 || upCnt >= 2 ? 2 : 1))
+      : (bullSurge >= 2 ? 3 : 2); // 暴涨次日最低 strength=2
+  } else if (isDown || surgeDown) {
+    trend = 'DOWN';
+    strength = isDown
+      ? (downCnt >= 3 ? 3 : (openPct < -3 || downCnt >= 2 ? 2 : 1))
+      : (bearSurge >= 2 ? 3 : 2);
+  }
+  return { trend, strength, openPct };
+}
+// ---- 当日前30分钟成交均价：跳空低开/暴跌后替代累计均价（避免累计均价严重滞后）----
+function computeEarlyAvg(bars, idx) {
+  if (idx < 3) return 0;
+  const limit = Math.min(idx, 30);
+  let sv = 0, svv = 0;
+  for (let k = idx - limit; k <= idx; k++) { sv += bars[k].price * (bars[k].vol || 0); svv += (bars[k].vol || 0); }
+  return svv > 0 ? sv / svv : 0;
+}
+// ---- 分钟级 RSI（Wilder 平滑，增量扩展）----
+function extendMinuteRSI(bars) {
+  const st = _tTradeRsiState, P = T_TRADE_CONFIG.rsiPeriod;
+  for (let i = st.arr.length; i < bars.length; i++) {
+    const p = bars[i].price;
+    if (i === 0) { st.prev = p; st.arr.push(null); continue; }
+    const chg = p - st.prev; st.prev = p;
+    if (!st.init) {
+      st.gSum += chg > 0 ? chg : 0; st.lSum += chg < 0 ? -chg : 0;
+      if (i < P) { st.arr.push(null); continue; }
+      st.ag = st.gSum / P; st.al = st.lSum / P; st.init = true;
+    } else {
+      st.ag = (st.ag * (P - 1) + (chg > 0 ? chg : 0)) / P;
+      st.al = (st.al * (P - 1) + (chg < 0 ? -chg : 0)) / P;
+    }
+    st.arr.push(st.al === 0 ? 100 : 100 - 100 / (1 + st.ag / st.al));
+  }
+  return st.arr;
+}
+// ---- 语音提示 ----
+function speakTTrade(text) {
+  try {
+    if (!('speechSynthesis' in window) || !text) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'zh-CN'; u.rate = 1.1; u.volume = 1; u.pitch = 1;
+    speechSynthesis.speak(u);
+  } catch (e) {}
+}
+// ---- 大盘 ----
+async function fetchMarketQuote() {
+  if (Date.now() - _marketQuoteCache.ts < 30000) return _marketQuoteCache;
+  const q = await fetchRealtimeQuote('sh000001', true);
+  if (q) { _marketQuoteCache = { chg: q.changePct || 0, ts: Date.now() }; }
+  return _marketQuoteCache;
+}
+// ---- 主力资金净流入 ----
+async function fetchFundFlow(code) {
+  if (!code) return null;
+  if (_fundFlowCache.code === code && Date.now() - _fundFlowCache.ts < 30000) return _fundFlowCache;
+  const secid = /^(6|9)/.test(code) ? '1.' + code : '0.' + code;
+  const url = 'https://push2.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=0&klt=1&secid=' + secid
+    + '&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56&invt=2';
+  const resp = await fetchWithRetry(url, {}, 1);
+  const json = await resp.json();
+  const ks = json && json.data && json.data.klines;
+  if (!ks || !ks.length) return null;
+  const parse = s => { const p = s.split(','); return { time: p[0].slice(11, 16), net: parseFloat(p[1]) || 0 }; };
+  const last = parse(ks[ks.length - 1]);
+  const prev = ks.length > 11 ? parse(ks[ks.length - 11]) : parse(ks[0]);
+  _fundFlowCache = { code, net: last.net, momo: last.net - prev.net, ts: Date.now() };
+  return _fundFlowCache;
+}
+function flowText(flow) {
+  if (!flow || !(flow.net !== 0)) return '主力资金 -';
+  const momo = (flow.momo || 0);
+  const dir = momo >= 0 ? '↑' : '↓';
+  return '主力' + (flow.net >= 0 ? '净流入 ' : '净流出 ') + formatAmount(Math.abs(flow.net)) + ' ' + dir;
+}
+// ============================================================
+// 分时做T引擎 v2：加入「趋势强度过滤 + 见顶/见底确认 + 反T冷却 + 均价修正」四层结构
+// ---- 修复历史问题 ----
+// 1) 单边强趋势股（如瑞联新材涨10%）9:42 过早高抛 → 强趋势下反T门槛 *2.5 + 见顶确认
+// 2) 跳空暴跌后均价严重滞后（水晶光电）→ 开盘跌幅≥limit*0.5 改用前30分钟均价
+// 3) 反T刚卖出还没回落就回补 → 反T冷却≥5分钟 + 回撤≥目标*0.6%
+// ============================================================
 function processMinuteTTrades() {
   if (!minuteData || !minuteData.bars || minuteData.bars.length < 3) return;
   const bars = minuteData.bars;
+  // 指数（如创业板指 399006）无可交易标的，不做做T买卖提示
+  if (/^399/.test(currentCode)) { _tTradeProcessedIdx = bars.length; return; }
   const dateKey = minuteData.date || getTodayLocalStr();
   if (_tTradeState.symbol !== currentSymbol || _tTradeState.date !== dateKey) {
     resetTTradeState(); _tTradeState = { symbol: currentSymbol, date: dateKey };
   }
+  const prof = getTTradeProfile();
+  const rsiArr = extendMinuteRSI(bars);
+  const trend = detectTrendStrength();
   if (_tTradeProcessedIdx >= bars.length) return;
+  const prevProcessed = _tTradeProcessedIdx;
   const prevClose = minuteData.prevClose > 0 ? minuteData.prevClose : bars[0].price;
   const boardChg = _boardQuoteCache.changePct || 0;
-  const isHighBeta = /^(300|301|688)/.test(currentCode); // 创业板/科创板 20% 涨跌幅
-  const cfg = T_TRADE_CONFIG;
-  const buyDrop = isHighBeta ? cfg.buyDrop * 1.2 : cfg.buyDrop;
-  const deepDrop = isHighBeta ? cfg.deepDrop * 1.2 : cfg.deepDrop;
-  const stopLoss = isHighBeta ? cfg.stopLoss * 1.3 : cfg.stopLoss;
-  const minSpread = cfg.minSpread;
+  const marketChg = _marketQuoteCache.chg || 0;
+  const flow = (_fundFlowCache.code === currentCode) ? _fundFlowCache : null;
+  const flowBuyTxt = flow ? flowText(flow) : '';
+  // 均价线滞后修正：开盘跌幅≥limit*0.5 且 ownChg 长期显著低于累计均价
+  const bigGapOpen = trend.openPct <= -prof.limitPct * 0.5;
+  // 反T冷却
+  let lastReverseSellIdx = -999;
+  for (let i = 0; i < tTradeSignals.length; i++) { const s = tTradeSignals[i]; if (s.type === 'sell' && s.reverse) lastReverseSellIdx = Math.max(lastReverseSellIdx, s.idx); }
+  const coolDownGap = Math.max(30, prof.minGapBars * 4);
+  const coolDownPriceRetrace = prof.minSpread * 0.6 / 100;
+  const cfg = prof;
   const volAvgAt = i => { let s = 0, c = 0; for (let k = Math.max(0, i - 5); k < i; k++) { s += (bars[k].vol || 0); c++; } return c > 0 ? s / c : 0; };
   const lastSigIdx = () => tTradeSignals.length ? tTradeSignals[tTradeSignals.length - 1].idx : -999;
-  for (let i = Math.max(1, _tTradeProcessedIdx); i < bars.length; i++) {
+  const startIdx = Math.max(1, prevProcessed);
+  let dayLow = Infinity, dayHigh = -Infinity;
+  for (let k = 0; k < startIdx; k++) { const p = bars[k].price; if (p > 0) { if (p < dayLow) dayLow = p; if (p > dayHigh) dayHigh = p; } }
+  const mkSig = (o) => {
+    const s = Object.assign({
+      id: dateKey.replace(/-/g, '') + '_' + o.idx + '_' + (o.reverse ? 'r' : '') + o.type,
+      score: 0, route: '', fresh: prevProcessed > 0 && o.idx >= prevProcessed
+    }, o);
+    tTradeSignals.push(s);
+    return s;
+  };
+  for (let i = startIdx; i < bars.length; i++) {
     const b = bars[i]; if (!b || !(b.price > 0)) continue;
+    if (b.price < dayLow) dayLow = b.price;
+    if (b.price > dayHigh) dayHigh = b.price;
     const mm = parseInt(String(b.time).replace(':', ''), 10);
     const ownChg = prevClose > 0 ? (b.price - prevClose) / prevClose * 100 : 0;
+    // 动态均价：暴跌后用前30分钟均价替代累计均价
+    const refAvg = bigGapOpen && bars[i].avg > 0 ? computeEarlyAvg(bars, i) || bars[i].avg : bars[i].avg;
     const vm = volAvgAt(i); const volRatio = vm > 0 ? (b.vol || 0) / vm : 0;
-    let priorLow = Infinity, priorHigh = -Infinity;
-    for (let k = 0; k < i; k++) { const p = bars[k].price; if (p > 0) { if (p < priorLow) priorLow = p; if (p > priorHigh) priorHigh = p; } }
-    const belowAvg = b.avg > 0 && b.price <= b.avg;
-    const aboveAvg = b.avg > 0 && b.price >= b.avg;
-    // ---- 持仓中：多头等卖出（价差≥2%）；反T空头等回补 ----
+    const rsi = rsiArr[i];
+    const devAvg = refAvg > 0 ? (b.price - refAvg) / refAvg * 100 : 0;
+    const speed = (i >= 5 && bars[i - 5].price > 0) ? (b.price - bars[i - 5].price) / bars[i - 5].price * 100 : 0;
+    const posInDay = dayHigh > dayLow ? (b.price - dayLow) / (dayHigh - dayLow) : 0.5;
+    const belowRef = refAvg > 0 && b.price <= refAvg;
+    const aboveRef = refAvg > 0 && b.price >= refAvg;
+    const env = '个股' + ownChg.toFixed(2) + '% · 板块' + boardChg.toFixed(2) + '% · 大盘' + marketChg.toFixed(2) + '%';
+    // ---- 持仓中 ----
     if (_tTradeOpen) {
       const entry = _tTradeOpen.price;
+      const tp = _tTradeOpen.targetPct || cfg.minSpread, sl = _tTradeOpen.stopPct || cfg.stopLoss;
+      const lock = Math.max(0.3, tp * 0.3);
       if (_tTradeOpen.side === 'short') {
-        const dropPct = (entry - b.price) / entry * 100; // 高抛后回落的价差
-        const buyBack = dropPct >= minSpread && (belowAvg || volRatio >= 1.2 || boardChg <= -0.3);
-        if (buyBack || dropPct <= -stopLoss) {
-          const isStop = dropPct <= -stopLoss;
-          tTradeSignals.push({
-            type:'buy', reverse:true, idx:i, time:b.time, price:b.price, profitPct:+dropPct.toFixed(2),
-            reason: isStop ? '反T止损 -' + (-dropPct).toFixed(2) + '%' : '反T回补 · 回落 ' + dropPct.toFixed(2) + '%',
-            sellTime:_tTradeOpen.time, sellPrice:entry, targetPct:minSpread, stopPct:stopLoss,
-            ownChg:+ownChg.toFixed(2), boardChg:+boardChg.toFixed(2), volRatio:+volRatio.toFixed(2)
+        const dropPct = (entry - b.price) / entry * 100;
+        _tTradeOpen.peak = Math.max(_tTradeOpen.peak || 0, dropPct);
+        // 反T回补：必须已冷却（距卖出≥N分钟）+ 至少回撤 1/2 目标价差
+        const coolOK = i - (_tTradeOpen.openIdx || 0) >= coolDownGap || (b.price - entry) / entry * -1 >= coolDownPriceRetrace;
+        const buyBack = dropPct >= tp && coolOK && (belowRef || volRatio >= 1.2 || boardChg <= -0.3 || (flow && flow.net > 0));
+        const trail = coolOK && (_tTradeOpen.peak >= tp * 0.7) && dropPct > 0 && (dropPct <= _tTradeOpen.peak - lock);
+        const eod = mm >= 1450 && dropPct >= tp * 0.4;
+        if (buyBack || trail || eod || dropPct <= -sl) {
+          const f = [];
+          if (dropPct <= -sl) f.push('反T止损 ' + dropPct.toFixed(2) + '%');
+          else if (eod) f.push('尾盘落袋 +' + dropPct.toFixed(2) + '%');
+          else if (trail) f.push('移动止盈 · 峰值+' + _tTradeOpen.peak.toFixed(2) + '% 回落至+' + dropPct.toFixed(2) + '%');
+          else { f.push('回落 ' + dropPct.toFixed(2) + '% ≥ 目标 ' + tp + '%'); if (belowRef) f.push('跌破均价'); if (volRatio >= 1.2) f.push('放量' + volRatio.toFixed(1) + 'x'); if (flow && flow.net > 0) f.push(flowBuyTxt); }
+          mkSig({
+            type: 'buy', reverse: true, idx: i, time: b.time, price: b.price, profitPct: +dropPct.toFixed(2),
+            reason: f.join(' · '), route: f.join(' → '), score: dropPct >= tp ? 5 : 0,
+            sellTime: _tTradeOpen.time, sellPrice: entry, targetPct: tp, stopPct: sl,
+            ownChg: +ownChg.toFixed(2), boardChg: +boardChg.toFixed(2), marketChg: +marketChg.toFixed(2), volRatio: +volRatio.toFixed(2),
+            speakText: '反T回补提示，价格' + b.price.toFixed(2) + '元'
           });
           _tTradeOpen = null;
         }
       } else {
         const diff = (b.price - entry) / entry * 100;
-        const takeProfit = diff >= minSpread && (aboveAvg || volRatio >= 1.5 || boardChg >= 0.3);
-        if (takeProfit || diff <= -stopLoss) {
-          const isStop = diff <= -stopLoss;
-          tTradeSignals.push({
-            type:'sell', idx:i, time:b.time, price:b.price, profitPct:+diff.toFixed(2),
-            reason: isStop ? 'T止损 ' + (-diff).toFixed(2) + '%' : '价差 +' + diff.toFixed(2) + '%',
-            ownChg:+ownChg.toFixed(2), boardChg:+boardChg.toFixed(2), volRatio:+volRatio.toFixed(2),
-            buyTime:_tTradeOpen.time, buyPrice:entry
+        _tTradeOpen.peak = Math.max(_tTradeOpen.peak || 0, diff);
+        const takeProfit = diff >= tp && (aboveRef || volRatio >= 1.5 || boardChg >= 0.3 || (flow && flow.net < 0));
+        const trail = (_tTradeOpen.peak >= tp * 0.7) && diff > 0 && (diff <= _tTradeOpen.peak - lock);
+        const eod = mm >= 1450 && diff >= tp * 0.4;
+        if (takeProfit || trail || eod || diff <= -sl) {
+          const f = [];
+          if (diff <= -sl) f.push('T止损 ' + diff.toFixed(2) + '%');
+          else if (eod) f.push('尾盘落袋 +' + diff.toFixed(2) + '%');
+          else if (trail) f.push('移动止盈 · 峰值+' + _tTradeOpen.peak.toFixed(2) + '% 回落至+' + diff.toFixed(2) + '%');
+          else { f.push('价差 +' + diff.toFixed(2) + '% ≥ 目标 ' + tp + '%'); if (aboveRef) f.push('站上均价'); if (volRatio >= 1.5) f.push('放量' + volRatio.toFixed(1) + 'x'); if (flow && flow.net < 0) f.push(flowBuyTxt); }
+          mkSig({
+            type: 'sell', idx: i, time: b.time, price: b.price, profitPct: +diff.toFixed(2),
+            reason: f.join(' · '), route: f.join(' → '), score: diff >= tp ? 5 : 0,
+            ownChg: +ownChg.toFixed(2), boardChg: +boardChg.toFixed(2), marketChg: +marketChg.toFixed(2), volRatio: +volRatio.toFixed(2),
+            buyTime: _tTradeOpen.time, buyPrice: entry, targetPct: tp, stopPct: sl,
+            speakText: 'T卖点提示，价格' + b.price.toFixed(2) + '元'
           });
           _tTradeOpen = null;
         }
       }
       continue;
     }
-    // ---- 空仓：低吸做T 或 反T高抛（开盘 10 分钟不操作，14:50 后不再新开） ----
+    // ---- 空仓 ----
     if (i < 10 || mm > cfg.noBuyAfter) continue;
     if (i - lastSigIdx() < cfg.minGapBars) continue;
-    const mildDrop = ownChg <= -buyDrop;
-    const deep = ownChg <= -deepDrop;
-    const panicVol = volRatio >= cfg.volSpike;
-    const weakBoard = boardChg <= 0.5;
-    const lowBreak = isFinite(priorLow) && b.price <= priorLow;
-    const mildRise = ownChg >= buyDrop;
-    const strongRise = ownChg >= deepDrop;
-    const strongBoard = boardChg >= 0.5;
-    const highBreak = isFinite(priorHigh) && b.price >= priorHigh;
-    if (mildDrop && belowAvg && (weakBoard || deep) && (panicVol || (deep && lowBreak))) {
-      _tTradeOpen = { side:'long', idx:i, time:b.time, price:b.price };
-      tTradeSignals.push({
-        type:'buy', idx:i, time:b.time, price:b.price, targetPct:minSpread, stopPct:stopLoss,
-        reason: '低于均价 · 个股' + ownChg.toFixed(2) + '% · 板块' + boardChg.toFixed(2) + '% · ' + (panicVol ? '放量' : '缩量新低'),
-        ownChg:+ownChg.toFixed(2), boardChg:+boardChg.toFixed(2), volRatio:+volRatio.toFixed(2)
-      });
-    } else if (mildRise && aboveAvg && (strongBoard || strongRise) && (panicVol || highBreak)) {
-      // 无持仓也提示高抛：判断当日高点已现，先卖后买做反T
-      _tTradeOpen = { side:'short', idx:i, time:b.time, price:b.price };
-      tTradeSignals.push({
-        type:'sell', reverse:true, idx:i, time:b.time, price:b.price, targetPct:minSpread, stopPct:stopLoss,
-        reason: '反T高抛 · 个股+' + ownChg.toFixed(2) + '% · 板块' + boardChg.toFixed(2) + '% · ' + (panicVol ? '放量滞涨' : '创新高'),
-        ownChg:+ownChg.toFixed(2), boardChg:+boardChg.toFixed(2), volRatio:+volRatio.toFixed(2)
-      });
+    const mildDrop = ownChg <= -cfg.buyDrop;
+    const mildRise = ownChg >= cfg.buyDrop;
+    if (!mildDrop && !mildRise) continue;
+    let score = 0; const f = [];
+    if (mildDrop) {
+      // ---- 低吸做T ----
+      if (rsi != null) { if (rsi <= 25) { score += 3; f.push('分钟RSI ' + rsi.toFixed(0) + ' 超卖'); } else if (rsi <= 35) { score += 2; f.push('分钟RSI ' + rsi.toFixed(0) + ' 偏弱'); } }
+      if (devAvg <= -cfg.devThr) { score += 2; f.push('偏离均价 ' + devAvg.toFixed(2) + '%'); }
+      if (volRatio >= 2) { score += 2; f.push('放量 ' + volRatio.toFixed(1) + 'x'); } else if (volRatio >= cfg.volSpike) { score += 1; f.push('放量 ' + volRatio.toFixed(1) + 'x'); }
+      if (boardChg <= 0) { score += 1; f.push('板块 ' + boardChg.toFixed(2) + '%'); }
+      if (ownChg - boardChg <= -cfg.buyDrop) { score += 1; f.push('弱于板块 ' + (ownChg - boardChg).toFixed(2) + 'pct'); }
+      if (marketChg <= 0) { score += 1; f.push('大盘 ' + marketChg.toFixed(2) + '%'); }
+      if (flow) { if (flow.net > 0) { score += 2; f.push('主力承接 ' + flowText(flow)); } else { score -= 1; f.push('主力流出 ' + flowText(flow)); } }
+      if (posInDay <= 0.2) { score += 1; f.push('贴近当日低点'); }
+      if (speed <= -cfg.devThr) { score += 1; f.push('5分钟急跌 ' + speed.toFixed(2) + '%'); }
+      if (ownChg <= -cfg.deepDrop) { score += 2; f.push('深跌 ' + ownChg.toFixed(2) + '%'); }
+      // 强趋势UP时低吸放宽（给更宽的止损）；强趋势DOWN时低吸正常
+      if (score >= cfg.scoreNeed) {
+        let slW = cfg.stopLoss, tpW = cfg.minSpread;
+        if (trend.trend === 'UP' && trend.strength >= 2) { slW = r1(cfg.stopLoss * 1.4); tpW = r1(cfg.minSpread * 0.8); }
+        _tTradeOpen = { side:'long', idx:i, openIdx:i, time:b.time, price:b.price, targetPct:tpW, stopPct:slW, peak:0 };
+        mkSig({
+          type:'buy', idx:i, time:b.time, price:b.price, targetPct:tpW, stopPct:slW,
+          reason:'低吸评分 ' + score + ' · ' + env, route:f.join(' → '), score,
+          ownChg:+ownChg.toFixed(2), boardChg:+boardChg.toFixed(2), marketChg:+marketChg.toFixed(2), volRatio:+volRatio.toFixed(2),
+          speakText:'T买点提示，价格' + b.price.toFixed(2) + '元'
+        });
+      }
+    } else {
+      // ---- 反T高抛（空仓先卖后买）----
+      // 反T总原则：强趋势UP日禁止过早反T（卖飞）、强趋势DOWN日禁止反T（接飞刀）
+      // 震荡日反T门槛加 1.1x 安全垫（避免 ownChg 刚够 minSpread 就卖）
+      if (trend.trend === 'DOWN' && trend.strength >= 2) {
+        f.push('暴跌次日不做反T'); continue; // 暴跌次日禁止反T高抛（风险太大）
+      }
+      let antiThreshold = cfg.minSpread;
+      let needTopConfirm = false;
+      if (trend.trend === 'UP') {
+        // 强趋势UP s≥3（连涨3日+今日高开）：反T门槛 minSpread*2.8 + 见顶确认
+        // 强趋势UP s≥2（暴涨次日/中强趋势）：反T门槛 minSpread*2.0 + 见顶确认
+        // 无条件抬高门槛，不需要等 ownChg 先够 minSpread*1.5
+        if (trend.strength >= 3) { antiThreshold = r1(cfg.minSpread * 2.8); needTopConfirm = true; f.push('强趋势UP s3·反T门槛' + antiThreshold + '% + 见顶确认'); }
+        else if (trend.strength >= 2) { antiThreshold = r1(cfg.minSpread * 2.0); needTopConfirm = true; f.push('中强/暴涨次日 s2·反T门槛' + antiThreshold + '% + 见顶确认'); }
+        else { antiThreshold = r1(cfg.minSpread * 1.1); f.push('弱UP s1·反T门槛' + antiThreshold + '%（震荡加10%安全垫）'); }
+      } else {
+        antiThreshold = r1(cfg.minSpread * 1.1); f.push('震荡·反T门槛' + antiThreshold + '%（加10%安全垫）');
+      }
+      // 反T冷却：距上一次反T卖出≥coolDownGap 根 K 线
+      if (i - lastReverseSellIdx < coolDownGap) continue;
+      // 评分（注意 devAvg 用的是 refAvg——跳空低开时自动是前30分钟均价）
+      score = 0;
+      if (rsi != null) { if (rsi >= 75) { score += 3; f.push('分钟RSI ' + rsi.toFixed(0) + ' 超买'); } else if (rsi >= 65) { score += 2; f.push('分钟RSI ' + rsi.toFixed(0) + ' 偏热'); } }
+      if (devAvg >= cfg.devThr) { score += 2; f.push('偏离均价 +' + devAvg.toFixed(2) + '%'); }
+      else if (devAvg < -0.3 && trend.strength >= 2) { score -= 2; f.push('低于均价·强趋势减分'); }
+      if (volRatio >= 2) { score += 2; f.push('放量 ' + volRatio.toFixed(1) + 'x'); } else if (volRatio >= cfg.volSpike) { score += 1; f.push('放量 ' + volRatio.toFixed(1) + 'x'); }
+      if (boardChg >= 0) { score += 1; f.push('板块 +' + boardChg.toFixed(2) + '%'); }
+      if (ownChg - boardChg >= cfg.buyDrop) { score += 1; f.push('强于板块 +' + (ownChg - boardChg).toFixed(2) + 'pct'); }
+      if (marketChg >= 0) { score += 1; f.push('大盘 +' + marketChg.toFixed(2) + '%'); }
+      if (flow) { if (flow.net < 0) { score += 2; f.push('主力流出 ' + flowText(flow)); } else { score -= 1; f.push('主力流入 ' + flowText(flow)); } }
+      if (posInDay >= 0.8) { score += 1; f.push('贴近当日高点'); }
+      if (speed >= cfg.devThr) { score += 1; f.push('5分钟急拉 +' + speed.toFixed(2) + '%'); }
+      if (ownChg >= cfg.deepDrop) { score += 2; f.push('急涨 +' + ownChg.toFixed(2) + '%'); }
+      // 趋势强度扣分：单边强趋势中，评分先扣后谈（避免噪声触发）
+      if (trend.trend === 'UP' && trend.strength >= 2) {
+        score -= trend.strength >= 3 ? 4 : 2;
+        f.push('强趋势过滤-' + (trend.strength >= 3 ? 4 : 2));
+      }
+      // 见顶确认（需连续2根收阴 + 当前价低于3分钟前高点≥0.4% + RSI≥60）
+      let topConfirm = false;
+      if (needTopConfirm) {
+        let bear2 = 0, bearHi = -Infinity;
+        for (let k = Math.max(1, i - 10); k <= i; k++) { if (bars[k].price > bars[k - 1].price) bear2 = 0; else bear2++; }
+        for (let k = Math.max(0, i - 3); k <= i; k++) { bearHi = Math.max(bearHi, bars[k].price); }
+        const backOff = bearHi > 0 ? (bearHi - b.price) / bearHi * 100 : 0;
+        topConfirm = bear2 >= 2 && backOff >= 0.4 && (rsi == null || rsi >= 60);
+        if (topConfirm) { score += 2; f.push('见顶确认 ✓（连2根阴线 + 回撤 ' + backOff.toFixed(2) + '%）'); }
+        else { f.push('等待见顶（连阴线=' + bear2 + ' 回撤=' + backOff.toFixed(2) + '%）'); }
+      }
+      // priceAboveAvg: 价格必须在 refAvg 上方至少 0.3%
+      // 避免 ownChg 刚够但价格还在均价下方（累计均价严重滞后时）的假信号
+      const priceAboveAvg = devAvg >= 0.3;
+      if (!priceAboveAvg) { f.push('低于均价·放弃'); }
+      // 最终门槛：ownChg≥antiThreshold + score≥minScore + 见顶确认(如需) + priceAboveAvg
+      const minScore = needTopConfirm ? cfg.scoreNeed + 1 : cfg.scoreNeed;
+      if (ownChg >= antiThreshold && score >= minScore && (!needTopConfirm || topConfirm) && priceAboveAvg) {
+        _tTradeOpen = { side:'short', idx:i, openIdx:i, time:b.time, price:b.price, targetPct:cfg.minSpread, stopPct:cfg.stopLoss, peak:0 };
+        mkSig({
+          type:'sell', reverse:true, idx:i, time:b.time, price:b.price, targetPct:cfg.minSpread, stopPct:cfg.stopLoss,
+          reason:'高抛评分 ' + score + ' · ' + env, route:f.join(' → '), score,
+          ownChg:+ownChg.toFixed(2), boardChg:+boardChg.toFixed(2), marketChg:+marketChg.toFixed(2), volRatio:+volRatio.toFixed(2),
+          speakText:'反T高抛提示，价格' + b.price.toFixed(2) + '元'
+        });
+      }
     }
   }
   _tTradeProcessedIdx = bars.length;
@@ -1688,46 +1952,68 @@ function renderMinuteSignalPanel() {
     if (html !== _lastSignalPanelHtml) { _lastSignalPanelHtml = html; signalPanel.innerHTML = html; }
     return;
   }
+  // 指数分时图：仅展示行情，不做做T买卖提示
+  if (/^399/.test(currentCode)) {
+    const pcIdx = minuteData.prevClose > 0 ? minuteData.prevClose : bars[0].price;
+    const chgIdx = pcIdx > 0 ? (last.price - pcIdx) / pcIdx * 100 : 0;
+    const htmlIdx = '<div class="signal-card" style="border-color:#2a4b6e;max-width:600px;"><div><div class="label">' + (currentName || currentCode) + ' · 指数分时</div><div class="value">现价 ' + last.price.toFixed(2) + ' · 涨跌幅 <span style="color:' + (chgIdx >= 0 ? '#ef5350' : '#26a69a') + '">' + (chgIdx >= 0 ? '+' : '') + chgIdx.toFixed(2) + '%</span><br/><span style="font-weight:400;color:#8faec9;">指数无可交易标的，不做做T买卖提示</span></div></div></div>';
+    if (htmlIdx !== _lastSignalPanelHtml) { _lastSignalPanelHtml = htmlIdx; signalPanel.innerHTML = htmlIdx; }
+    return;
+  }
+  const prof = getTTradeProfile();
+  const trend = detectTrendStrength();
   const pc = minuteData.prevClose > 0 ? minuteData.prevClose : bars[0].price;
   const ownChg = pc > 0 ? (last.price - pc) / pc * 100 : 0;
   const ownColor = ownChg >= 0 ? '#ef5350' : '#26a69a';
   const sig = (v) => (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
-  cards.push('<div class="signal-card" style="border-color:#2a4b6e;"><div><div class="label">做T环境 · ' + boardName + ' ' + sig(boardChg) + '</div><div class="value">个股 <span style="color:' + ownColor + '">' + sig(ownChg) + '</span> · 现价 ¥' + last.price.toFixed(2) + ' · 均价 ¥' + last.avg.toFixed(2) + '</div></div></div>');
+  const marketChg = _marketQuoteCache.chg || 0;
+  const flow = (_fundFlowCache.code === currentCode) ? _fundFlowCache : null;
+  const rsiArr = _tTradeRsiState.arr;
+  const curRsi = rsiArr.length ? rsiArr[rsiArr.length - 1] : null;
+  const trendTag = trend.strength >= 2 ? ('强趋势' + (trend.trend === 'UP' ? '↑' : '↓') + '(' + trend.strength + ')') : '震荡';
+  cards.push('<div class="signal-card" style="border-color:#2a4b6e;max-width:600px;"><div><div class="label">做T环境 · ' + prof.typeLabel + ' · ' + trendTag + ' · 目标价差 ' + prof.minSpread + '% · 止损 ' + prof.stopLoss + '%</div><div class="value">大盘 ' + sig(marketChg) + ' · ' + boardName + ' ' + sig(boardChg) + ' · 个股 <span style="color:' + ownColor + '">' + sig(ownChg) + '</span> · 均价 ¥' + last.avg.toFixed(2) + (curRsi != null ? ' · 分时RSI ' + curRsi.toFixed(0) : '') + '<br/>' + flowText(flow) + ' · 现价 ¥' + last.price.toFixed(2) + '</div></div></div>');
   if (_tTradeOpen && last) {
     const isShort = _tTradeOpen.side === 'short';
     const diff = (last.price - _tTradeOpen.price) / _tTradeOpen.price * 100;
     const profit = isShort ? -diff : diff;
-    const target = _tTradeOpen.price * (1 + (isShort ? -1 : 1) * T_TRADE_CONFIG.minSpread / 100);
-    const stop = _tTradeOpen.price * (1 + (isShort ? 1 : -1) * T_TRADE_CONFIG.stopLoss / 100);
-    cards.push('<div class="signal-card' + (profit >= 2 ? ' active-buy' : '') + '" style="border-color:#26c6da;"><div><div class="label">' + (isShort ? '反T高抛持仓中 · ' + _tTradeOpen.time + ' 高抛' : '做T持仓中 · ' + _tTradeOpen.time + ' 低吸') + '</div><div class="value">' + (isShort ? '卖出' : '成本') + ' ¥' + _tTradeOpen.price.toFixed(2) + ' · 现价 ¥' + last.price.toFixed(2) + ' · 浮盈 <span style="color:' + (profit >= 0 ? '#ef5350' : '#26a69a') + '">' + sig(profit) + '</span> · ' + (isShort ? '回补目标' : '目标') + ' ¥' + target.toFixed(2) + ' · 止损 ¥' + stop.toFixed(2) + '</div></div></div>');
+    const tp = _tTradeOpen.targetPct || prof.minSpread, sl = _tTradeOpen.stopPct || prof.stopLoss;
+    const target = _tTradeOpen.price * (1 + (isShort ? -1 : 1) * tp / 100);
+    const stop = _tTradeOpen.price * (1 + (isShort ? 1 : -1) * sl / 100);
+    const peakTxt = _tTradeOpen.peak >= tp * 0.7 ? ' · 峰值 +' + _tTradeOpen.peak.toFixed(2) + '%' : '';
+    cards.push('<div class="signal-card" style="border-color:#26c6da;"><div><div class="label">' + (isShort ? '反T高抛持仓中 · ' + _tTradeOpen.time + ' 高抛' : '做T持仓中 · ' + _tTradeOpen.time + ' 低吸') + '</div><div class="value">' + (isShort ? '卖出' : '成本') + ' ¥' + _tTradeOpen.price.toFixed(2) + ' · 现价 ¥' + last.price.toFixed(2) + ' · 浮盈 <span style="color:' + (profit >= 0 ? '#ef5350' : '#26a69a') + '">' + sig(profit) + '</span>' + peakTxt + ' · ' + (isShort ? '回补目标' : '目标') + ' ¥' + target.toFixed(2) + ' · 止损 ¥' + stop.toFixed(2) + '</div></div></div>');
   }
-  const recent = tTradeSignals.slice(-4);
+  // 最多显示最近4张（环境卡+持仓卡不计入"最多4张"），新卡片不再闪烁
+  const freshSigs = [];
+  const recent = tTradeSignals.slice(-4).slice().sort((a, b) => a.idx - b.idx);
   recent.forEach(s => {
+    const isNew = !!(s.fresh && !s._shown);
+    if (isNew) { s._shown = true; freshSigs.push(s); }
     if (s.type === 'buy') {
       if (s.reverse) {
-        cards.push('<div class="signal-card active-buy" style="animation:none;"><div><div class="label">T回补(反T) · ' + s.time + ' · ' + s.reason + '</div><div class="value">回补 ¥' + s.price.toFixed(2) + ' · 高抛价 ¥' + (s.sellPrice || 0).toFixed(2) + ' · 价差 <span style="color:#ef5350">' + sig(s.profitPct) + '</span></div></div></div>');
+        cards.push('<div class="signal-card"><div><div class="label">T回补(反T) · ' + s.time + ' · ' + s.reason + '</div><div class="value">回补 ¥' + s.price.toFixed(2) + ' · 高抛价 ¥' + (s.sellPrice || 0).toFixed(2) + ' · 价差 <span style="color:#ef5350">' + sig(s.profitPct) + '</span><br/><span style="font-weight:400;color:#8faec9;">路由: ' + (s.route || s.reason || '-') + '</span></div></div></div>');
       } else {
-        const target = s.price * (1 + (s.targetPct || T_TRADE_CONFIG.minSpread) / 100);
-        const stop = s.price * (1 - (s.stopPct || T_TRADE_CONFIG.stopLoss) / 100);
-        cards.push('<div class="signal-card active-buy" style="animation:none;"><div><div class="label">T买点 · ' + s.time + ' · ' + s.reason + '</div><div class="value">买入 ¥' + s.price.toFixed(2) + ' · 目标 ¥' + target.toFixed(2) + ' (+' + (s.targetPct || T_TRADE_CONFIG.minSpread) + '%) · 止损 ¥' + stop.toFixed(2) + '</div></div></div>');
+        const target = s.price * (1 + (s.targetPct || prof.minSpread) / 100);
+        const stop = s.price * (1 - (s.stopPct || prof.stopLoss) / 100);
+        cards.push('<div class="signal-card active-buy"><div><div class="label">T买点 · ' + s.time + ' · 评分 ' + (s.score || 0) + ' · ' + s.reason + '</div><div class="value">买入 ¥' + s.price.toFixed(2) + ' · 目标 ¥' + target.toFixed(2) + ' (+' + (s.targetPct || prof.minSpread) + '%) · 止损 ¥' + stop.toFixed(2) + '<br/><span style="font-weight:400;color:#8faec9;">路由: ' + (s.route || '-') + '</span></div></div></div>');
       }
     } else if (s.reverse) {
-      const buyTarget = s.price * (1 - (s.targetPct || T_TRADE_CONFIG.minSpread) / 100);
-      const stop = s.price * (1 + (s.stopPct || T_TRADE_CONFIG.stopLoss) / 100);
-      cards.push('<div class="signal-card active-sell" style="animation:none;"><div><div class="label">T高抛(反T) · ' + s.time + ' · ' + s.reason + '</div><div class="value">卖出 ¥' + s.price.toFixed(2) + ' · 回补目标 ¥' + buyTarget.toFixed(2) + ' (-' + (s.targetPct || T_TRADE_CONFIG.minSpread) + '%) · 止损 ¥' + stop.toFixed(2) + '</div></div></div>');
+      const buyTarget = s.price * (1 - (s.targetPct || prof.minSpread) / 100);
+      const stop = s.price * (1 + (s.stopPct || prof.stopLoss) / 100);
+      cards.push('<div class="signal-card active-sell"><div><div class="label">T高抛(反T) · ' + s.time + ' · 评分 ' + (s.score || 0) + ' · ' + s.reason + '</div><div class="value">卖出 ¥' + s.price.toFixed(2) + ' · 回补目标 ¥' + buyTarget.toFixed(2) + ' (-' + (s.targetPct || prof.minSpread) + '%) · 止损 ¥' + stop.toFixed(2) + '<br/><span style="font-weight:400;color:#8faec9;">路由: ' + (s.route || '-') + '</span></div></div></div>');
     } else {
       const profitColor = s.profitPct >= 0 ? '#ef5350' : '#26a69a';
-      cards.push('<div class="signal-card active-sell" style="animation:none;"><div><div class="label">T卖点 · ' + s.time + ' · ' + s.reason + '</div><div class="value">卖出 ¥' + s.price.toFixed(2) + ' · 成本 ¥' + (s.buyPrice || 0).toFixed(2) + ' · 价差 <span style="color:' + profitColor + '">' + sig(s.profitPct) + '</span></div></div></div>');
+      cards.push('<div class="signal-card active-sell"><div><div class="label">T卖点 · ' + s.time + ' · ' + s.reason + '</div><div class="value">卖出 ¥' + s.price.toFixed(2) + ' · 成本 ¥' + (s.buyPrice || 0).toFixed(2) + ' · 价差 <span style="color:' + profitColor + '">' + sig(s.profitPct) + '</span><br/><span style="font-weight:400;color:#8faec9;">路由: ' + (s.route || '-') + '</span></div></div></div>');
     }
   });
   if (tTradeSignals.length === 0 && !_tTradeOpen) {
-    cards.push('<div class="signal-card" style="border-color:#2a3340;border-style:dashed;"><div><div class="label">等待做T机会</div><div class="value">低吸: 跌破均价 + 个股跌幅≥1% + (板块走弱 或 深跌≥2.5%)；反T: 站上均价 + 涨幅≥1% + (板块强势 或 放量新高)；价差≥2%提示。</div></div></div>');
+    let tip = '做T评分 ≥' + prof.scoreNeed + ' · 反T门槛需同时满足 ownChg ≥ ' + prof.minSpread + '% + 见顶确认 · 强趋势时反T门槛自动抬高至目标价差×2.0~2.8';
+    if (trend.strength >= 2 && trend.trend === 'UP') tip = '当前 ' + trendTag + ' 单边强势，反T高抛需 ownChg ≥ ' + r1(prof.minSpread * (trend.strength >= 3 ? 2.8 : 2.0)) + '% + 见顶确认，避免过早卖飞。低吸则放宽。';
+    cards.push('<div class="signal-card" style="border-color:#2a3340;border-style:dashed;max-width:720px;"><div><div class="label">等待做T机会 · ' + prof.typeLabel + ' · ' + trendTag + '</div><div class="value" style="font-weight:400;">' + tip + '</div></div></div>');
   }
   const html = cards.join('');
   if (html !== _lastSignalPanelHtml) { _lastSignalPanelHtml = html; signalPanel.innerHTML = html; }
+  if (freshSigs.length) freshSigs.forEach(s => speakTTrade(s.speakText || (s.type === 'buy' ? 'T买点提示' : 'T卖点提示')));
 }
-
-// ============================================================
 // 加载股票数据
 // ============================================================
 async function loadStockData(code, name, forceFullRefresh) {
@@ -1928,6 +2214,20 @@ function renderMinuteChart() {
   const prevClose = (minuteData && minuteData.prevClose > 0) ? minuteData.prevClose : (bars.length > 0 ? bars[0].price : 0);
   const tBuyPoints = tTradeSignals.filter(s => s.type === 'buy').map(s => ({ value: [s.time, s.price], itemStyle: { color: s.reverse ? '#26c6da' : '#ef5350' }, label: { show: true, formatter: s.reverse ? 'T回补' : 'T买', position: 'top', color: s.reverse ? '#26c6da' : '#ef5350', fontSize: 9, fontWeight: 600 } }));
   const tSellPoints = tTradeSignals.filter(s => s.type === 'sell').map(s => ({ value: [s.time, s.price], itemStyle: { color: s.reverse ? '#f7d44a' : '#26a69a' }, label: { show: true, formatter: s.reverse ? 'T高抛' : 'T卖', position: 'bottom', color: s.reverse ? '#f7d44a' : '#26a69a', fontSize: 9, fontWeight: 600 } }));
+  // 信号路由速查：time -> 信号（tooltip 显示买卖路由）
+  const sigByTime = new Map(); tTradeSignals.forEach(s => { if (!sigByTime.has(s.time)) sigByTime.set(s.time, s); });
+  // 持仓中：图上画出 成本/目标/止损 三条参考线
+  let openMarkLine = null;
+  if (_tTradeOpen) {
+    const isShort = _tTradeOpen.side === 'short';
+    const entry = _tTradeOpen.price, tp = _tTradeOpen.targetPct || 2, sl = _tTradeOpen.stopPct || 1.5;
+    const tgt = entry * (1 + (isShort ? -1 : 1) * tp / 100), stp = entry * (1 + (isShort ? 1 : -1) * sl / 100);
+    openMarkLine = { silent: true, symbol: 'none', lineStyle: { type: 'dashed', width: 1 }, label: { fontSize: 9 }, data: [
+      { yAxis: entry, lineStyle: { color: '#e6edf3' }, label: { formatter: (isShort ? '高抛 ' : '成本 ') + entry.toFixed(2), color: '#e6edf3' } },
+      { yAxis: tgt, lineStyle: { color: '#26a69a' }, label: { formatter: (isShort ? '回补目标 ' : '目标 ') + tgt.toFixed(2), color: '#26a69a' } },
+      { yAxis: stp, lineStyle: { color: '#ef5350' }, label: { formatter: '止损 ' + stp.toFixed(2), color: '#ef5350' } }
+    ] };
+  }
   const option = {
     backgroundColor:'#0a0e14', animation:false,
     tooltip:{ trigger:'axis', axisPointer:{ type:'cross', lineStyle:{ color:'#8faec9', type:'dashed' } }, backgroundColor:'rgba(20,24,31,0.95)', borderColor:'#2a3340', textStyle:{ color:'#e6edf3', fontSize:11 },
@@ -1938,8 +2238,14 @@ function renderMinuteChart() {
         const chg = prevClose > 0 ? ((b.price - prevClose) / prevClose * 100).toFixed(2) : '-';
         const color = b.price >= prevClose ? '#ef5350' : '#26a69a';
         let html = '<b>' + b.time + '</b><br/>价: <span style="color:' + color + '">' + b.price.toFixed(2) + (prevClose > 0 ? ' (' + chg + '%)' : '') + '</span><br/>均: ' + b.avg.toFixed(2) + '<br/>量: ' + b.vol + ' 手';
-        const tm = params.find(p => p.seriesName === 'T买' || p.seriesName === 'T卖');
-        if (tm && tm.value) { const c = tm.seriesName === 'T买' ? '#ef5350' : '#26a69a'; html += '<br/><span style="color:' + c + ';font-weight:600;">' + tm.seriesName + '</span> ' + tm.value[0] + ' ¥' + (+tm.value[1]).toFixed(2); }
+        const sg = sigByTime.get(b.time);
+        if (sg) {
+          const name = sg.type === 'buy' ? (sg.reverse ? 'T回补(反T)' : 'T买点') : (sg.reverse ? 'T高抛(反T)' : 'T卖点');
+          const c = sg.type === 'buy' ? (sg.reverse ? '#26c6da' : '#ef5350') : (sg.reverse ? '#f7d44a' : '#26a69a');
+          html += '<br/><span style="color:' + c + ';font-weight:600;">' + name + ' ¥' + sg.price.toFixed(2) + '</span>';
+          if (sg.route) html += '<br/><span style="color:#8faec9;">路由: ' + sg.route + '</span>';
+          else if (sg.reason) html += '<br/><span style="color:#8faec9;">' + sg.reason + '</span>';
+        }
         return html;
       } },
     grid:[{ left:60, right:20, top:'6%', height:'60%' },{ left:60, right:20, top:'70%', height:'22%' }],
@@ -1954,7 +2260,7 @@ function renderMinuteChart() {
         } }, axisLine:{ lineStyle:{ color:'#2a3340' } }, axisTick:{ show:false },
         splitLine:{ show:true, lineStyle:{ color:'#151b24' }, interval: function(idx, value){ return ['09:30','10:30','11:30','13:00','14:00','15:00'].indexOf(value) >= 0; } } }],
     yAxis:[{ scale:true, gridIndex:0, splitLine:{ lineStyle:{ color:'#1a2028' } }, axisLabel:{ color:'#7a8b9e', fontSize:10 } },{ scale:true, gridIndex:1, splitLine:{ show:false }, axisLabel:{ show:false } }],
-    series:[{ name:'价格', type:'line', data:prices, xAxisIndex:0, yAxisIndex:0, smooth:false, symbol:'none', lineStyle:{ width:1.5, color:'#4f9eff' }, z:10 },{ name:'均价', type:'line', data:avgs, xAxisIndex:0, yAxisIndex:0, smooth:false, symbol:'none', lineStyle:{ width:1.5, color:'#f7d44a' }, z:10 },{ name:'成交量', type:'bar', data:vols, xAxisIndex:1, yAxisIndex:1, barWidth:'60%' },{ name:'T买', type:'scatter', data:tBuyPoints, xAxisIndex:0, yAxisIndex:0, symbol:'triangle', symbolSize:11, z:15 },{ name:'T卖', type:'scatter', data:tSellPoints, xAxisIndex:0, yAxisIndex:0, symbol:'triangle', symbolRotate:180, symbolSize:11, z:15 }]
+    series:[{ name:'价格', type:'line', data:prices, xAxisIndex:0, yAxisIndex:0, smooth:false, symbol:'none', lineStyle:{ width:1.5, color:'#4f9eff' }, z:10, ...(openMarkLine ? { markLine: openMarkLine } : {}) },{ name:'均价', type:'line', data:avgs, xAxisIndex:0, yAxisIndex:0, smooth:false, symbol:'none', lineStyle:{ width:1.5, color:'#f7d44a' }, z:10 },{ name:'成交量', type:'bar', data:vols, xAxisIndex:1, yAxisIndex:1, barWidth:'60%' },{ name:'T买', type:'scatter', data:tBuyPoints, xAxisIndex:0, yAxisIndex:0, symbol:'triangle', symbolSize:11, z:15 },{ name:'T卖', type:'scatter', data:tSellPoints, xAxisIndex:0, yAxisIndex:0, symbol:'triangle', symbolRotate:180, symbolSize:11, z:15 }]
   };
   myChart.setOption(option, true);
   updateSignalPanel();
@@ -2165,7 +2471,13 @@ function _renderKlineChart(forceRebuild) {
       trigger: 'axis',
       axisPointer: { type: 'cross', lineStyle: { color: '#8faec9', type: 'dashed' }, label: { show: true, backgroundColor: '#1a2028', borderColor: '#d4a017', borderWidth: 1, color: '#f7d44a', fontSize: 11, fontWeight: 'bold', padding: [4, 8], borderRadius: 4 } },
       backgroundColor: 'rgba(20,24,31,0.95)', borderColor: '#2a3340', textStyle: { color: '#e6edf3', fontSize: 11 },
-      formatter: function (params) { const p = params[0]; if (!p) return ''; const idx = p.dataIndex; const bar = allBars[idx]; if (!bar) return ''; const isFuture = hasFuture && idx >= futureStartIdx; return '<b style="color:#d4a017">' + bar.date + (isFuture ? ' 🔮' : '') + '</b>'; }
+      formatter: function (params) { const p = params[0]; if (!p) return ''; const idx = p.dataIndex; const bar = allBars[idx]; if (!bar) return ''; const isFuture = hasFuture && idx >= futureStartIdx;
+        let html = '<b style="color:#d4a017">' + bar.date + (isFuture ? ' 🔮' : '') + '</b>';
+        const bs = periodBuySignals.find(s => s.date === bar.date && s.type !== 'future');
+        const ss = periodSellSignals.find(s => s.sellDate === bar.date && s.type !== 'future');
+        if (bs) html += '<br/><span style="color:#ef5350;font-weight:600;">买入 ¥' + bs.price.toFixed(2) + '</span>' + (bs.reason ? '<br/><span style="color:#8faec9;">路由: ' + bs.reason + '</span>' : '');
+        if (ss) html += '<br/><span style="color:#26a69a;font-weight:600;">卖出 ¥' + ss.sellPrice.toFixed(2) + '</span>' + (ss.reason ? '<br/><span style="color:#8faec9;">路由: ' + ss.reason + '</span>' : '');
+        return html; }
     },
     legend: { data: chartSettings.maPeriods.map((p, i) => ({ name: 'MA' + p, itemStyle: { color: MA_COLORS[i] } })), textStyle: { color: '#a9b8c9', fontSize: 10 }, top: 4, left: 'center', icon: 'roundRect', itemWidth: 12, itemHeight: 4 },
     grid: [{ left: 60, right: 20, top: '7%', height: '52%' }, { left: 60, right: 20, top: '61%', height: '11%' }, { left: 60, right: 20, top: '74%', height: '18%' }],
@@ -2437,21 +2749,23 @@ function updateSignalPanel() {
 // 加载股票
 // ============================================================
 async function loadStock(code, name) {
-  currentPeriod = 'day'; minuteData = null; futureBars = [];
+  // 切换股票默认展示分时图
+  currentPeriod = 'minute'; minuteData = null; futureBars = [];
   cursorIndex = -1; clickedIndex = -1; _lastInfoIdx = -1; _lastInfoBoxKey = '';
   _periodCache.period = null; _periodCache.lastTotal = 0;
   clearFutureSignals();
   document.querySelectorAll('.period-group button').forEach(b => b.classList.remove('active'));
-  document.getElementById('btnDay').classList.add('active');
-  updateReviewInputForPeriod('day'); subIndicatorSelect.style.display = '';
+  const minuteBtn = document.getElementById('btnMinute');
+  if (minuteBtn) minuteBtn.classList.add('active');
+  updateReviewInputForPeriod('minute');
+  if (subIndicatorSelect) subIndicatorSelect.style.display = 'none';
   const ok = await loadStockData(code, name, false);
-  if (ok) { const totalBars = rawDailyData.length; const showCount = Math.min(200, totalBars); currentZoom.start = totalBars > showCount ? (1 - showCount/totalBars) * 100 : 0; currentZoom.end = 100; renderChart(false, true); lockZoom(currentZoom.start, currentZoom.end, 1500); }
+  if (ok) {
+    await switchPeriod('minute');
+    // 分时数据不可用时回退日线，避免空图
+    if (!minuteData || !minuteData.bars || !minuteData.bars.length) await switchPeriod('day');
+  }
   updateWatchlistActive();
-  const lastReview = loadLastReviewStrategies(currentCode, currentPeriod);
-  if (lastReview && (lastReview.buyIds.length > 0 || lastReview.sellIds.length > 0)) { restoreStrategyChecks(lastReview.buyIds, lastReview.sellIds); statusEl.innerHTML += ' <span class="badge cyan">已恢复上次复盘策略</span>'; }
-  else restoreStrategyChecks([], []);
-  const runAutoApply = () => { autoApplyLastReviewStrategies(); const allBars = getPeriodData().allBars || []; const total = allBars.length || rawDailyData.length; const visible = Math.max(1, Math.round((currentZoom.end - currentZoom.start) / 100 * total)); const start = total > visible ? (1 - visible / total) * 100 : 0; lockZoom(start, 100, 1000); };
-  if (window.requestIdleCallback) requestIdleCallback(runAutoApply, { timeout: 600 }); else setTimeout(runAutoApply, 300);
 }
 
 // ============================================================
@@ -3672,6 +3986,8 @@ async function switchPeriod(period) {
     try {
       minuteData = await fetchMinuteData(currentSymbol);
       try { await fetchBoardQuote(currentCode); } catch (e) {}
+      fetchMarketQuote().catch(() => {});
+      fetchFundFlow(currentCode).catch(() => {});
       processMinuteTTrades();
       const symAtCall = currentSymbol;
       fetchRealtimeQuote(symAtCall, true).then(q => { if (q && currentSymbol === symAtCall) applyRealtimeQuote(q); }).catch(() => {});
@@ -3822,6 +4138,8 @@ async function refreshMinuteExtras() {
     const q = await fetchRealtimeQuote(symNow, true);
     if (q && currentSymbol === symNow) applyRealtimeQuote(q);
   } catch (e) {}
+  fetchMarketQuote().catch(() => {});   // 大盘（上证）涨跌幅
+  fetchFundFlow(codeNow).catch(() => {}); // 主力资金净流入
   if (currentSymbol === symNow) processMinuteTTrades();
 }
 async function updateTodayBarFromMinute(silent) {
@@ -3879,8 +4197,12 @@ document.getElementById('forceRefreshBtn').addEventListener('click', async () =>
   log('布局...');
   updateReviewInputForPeriod('day'); subIndicatorSelect.value = subIndicator; layoutChart();
   log('加载股票数据...');
-  try { await Promise.race([loadStock('002138', '顺络电子'), new Promise((_, rej) => setTimeout(() => rej(new Error('LOAD_TIMEOUT')), 25000))]); log('股票加载完成'); }
-  catch (e) { console.warn('加载超时', e); log('加载超时，使用兜底数据'); if (rawDailyData.length === 0) { rawDailyData = generateMockData('sz002138'); dataLoaded = true; stockLabel.textContent = 'SZ002138'; stockTitle.textContent = '顺络电子'; updatePriceInputs(); renderChart(false, true); } }
+  // 默认股票：自选股列表第一只；自选股为空时显示创业板指 399006 分时图
+  const firstWatch = Array.isArray(watchlist) && watchlist.length > 0 ? watchlist[0] : null;
+  const initCode = firstWatch && firstWatch.code ? String(firstWatch.code) : '399006';
+  const initName = firstWatch && firstWatch.name ? firstWatch.name : (initCode === '399006' ? '创业板指' : '');
+  try { await Promise.race([loadStock(initCode, initName), new Promise((_, rej) => setTimeout(() => rej(new Error('LOAD_TIMEOUT')), 25000))]); log('股票加载完成'); }
+  catch (e) { console.warn('加载超时', e); log('加载超时，使用兜底数据'); if (rawDailyData.length === 0) { rawDailyData = generateMockData(getSymbolWithPrefix(initCode)); dataLoaded = true; stockLabel.textContent = getSymbolWithPrefix(initCode).toUpperCase(); stockTitle.textContent = initName || initCode; updatePriceInputs(); renderChart(false, true); } }
   log('启动实时更新');
   startRealtimeUpdater();
   setTimeout(() => { renderWatchlist(); renderStrategySelect(); renderSellStrategySelect(); }, 0);
