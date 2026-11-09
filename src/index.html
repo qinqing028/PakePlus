@@ -754,7 +754,7 @@ window.addEventListener('online', updateOnlineStatus);
 window.addEventListener('offline', updateOnlineStatus);
 updateOnlineStatus();
 const chartDom = document.getElementById('klineChart');
-const myChart = echarts.init(chartDom, null, { renderer:'canvas', useDirtyRect:true });
+const myChart = echarts.init(chartDom, null, { renderer:'canvas', useDirtyRect:false }); // 关闭脏矩形局部重绘：切换周期/股票时避免旧曲线残影
 const stockLabel = document.getElementById('stockLabel');
 const stockTitle = document.getElementById('stockTitle');
 const openInput = document.getElementById('openInput');
@@ -915,7 +915,7 @@ let dataLoaded = false;
 let currentSymbol = 'sz002138';
 let currentCode = '002138';
 let currentName = '顺络电子';
-let _mockRetryCode = ''; let _mockRetryCount = 0; let _mockRetryTimer = null;
+let _offlineRetryCode = ''; let _offlineRetryCount = 0; let _offlineRetryTimer = null;
 let buySignals = [];
 let sellSignals = [];
 let currentZoom = { start:60, end:100 };
@@ -1357,7 +1357,7 @@ function updateKlineInfoBox(idx) {
     // 优先复用 _renderKlineChart 的指标
     const meta = _renderKlineChart._indicatorMeta;
     let maList = null;
-    if (meta && meta.maList && meta.len === allBars.length && meta.maPeriods === chartSettings.maPeriods.join(',')) {
+    if (meta && meta.maList && meta.len === allBars.length && meta.period === currentPeriod && meta.maPeriods === chartSettings.maPeriods.join(',')) {
       maList = meta.maList;
     } else if (_infoBoxCache.barsRef !== allBars) {
       _infoBoxCache.barsRef = allBars;
@@ -1397,22 +1397,84 @@ async function fetchWithRetry(url, options, retries) {
   }
   throw lastErr;
 }
-async function fetchRangeFromNetwork(symbol, startDate, endDate) {
-  if (!navigator.onLine) throw new Error('OFFLINE');
-  const param = startDate ? symbol + ',day,' + startDate + ',' + endDate + ',640,qfq' : symbol + ',day,,' + endDate + ',640,qfq';
-  const url = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' + param;
-  const resp = await fetchWithRetry(url, {});
-  const json = await resp.json();
-  const stockData = json?.data?.[symbol]; if (!stockData) throw new Error('数据格式异常');
-  const klines = stockData.qfqday || stockData.day; if (!klines || !Array.isArray(klines)) return [];
+// 腾讯K线统一解析（主源与备用源 data 结构一致）
+function parseTencentKlines(stockData) {
+  if (!stockData) return null;
+  const klines = stockData.qfqday || stockData.day;
+  if (!Array.isArray(klines)) return null;
   const parsed = [];
   for (const item of klines) {
+    if (!item || item.length < 5) continue;
     const rawVol = parseFloat(item[5]) || 0;
-    const bar = { date:item[0], open:parseFloat(item[1]), close:parseFloat(item[2]), high:parseFloat(item[3]), low:parseFloat(item[4]), volume:rawVol };
+    const bar = { date:String(item[0]).slice(0,10), open:parseFloat(item[1]), close:parseFloat(item[2]), high:parseFloat(item[3]), low:parseFloat(item[4]), volume:rawVol };
     const rawAmt = parseFloat(item[6]); if (isFinite(rawAmt) && rawAmt > 0) bar.amount = rawAmt;
-    if (!isNaN(bar.open) && !isNaN(bar.close) && !isNaN(bar.low) && !isNaN(bar.high)) parsed.push(bar);
+    if (bar.date && isFinite(bar.open) && isFinite(bar.close) && isFinite(bar.low) && isFinite(bar.high)) parsed.push(bar);
   }
   return parsed;
+}
+// 腾讯 sh600000 / sz000001 → 东方财富 secid 1.600000 / 0.000001
+function toSecid(symbol) {
+  const m = /^(sh|sz)(\d{6})$/i.exec(symbol || '');
+  if (!m) return '';
+  return (m[1].toLowerCase() === 'sh' ? '1' : '0') + '.' + m[2];
+}
+// 源1：腾讯主源（支持CORS，通常最快）
+async function fetchKlineSourceTencent(symbol, startDate, endDate) {
+  const param = startDate ? symbol + ',day,' + startDate + ',' + endDate + ',640,qfq' : symbol + ',day,,' + endDate + ',640,qfq';
+  const resp = await fetchWithRetry('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' + param, {}, 2);
+  const json = await resp.json();
+  const stockData = json?.data?.[symbol]; if (!stockData) throw new Error('数据格式异常');
+  const bars = parseTencentKlines(stockData); if (!bars) throw new Error('数据格式异常');
+  return bars;
+}
+// 源2：东方财富（CORS 放行，字段顺序 日期,开,收,高,低,成交量(手),成交额,振幅）
+async function fetchKlineSourceEastmoney(symbol, startDate, endDate) {
+  const secid = toSecid(symbol); if (!secid) throw new Error('secid 映射失败');
+  const beg = startDate ? startDate.replace(/-/g, '') : '0';
+  const end = endDate ? endDate.replace(/-/g, '') : '20500101';
+  const url = 'https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=' + secid
+    + '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58&klt=101&fqt=1&beg=' + beg + '&end=' + end;
+  const resp = await fetchWithRetry(url, {}, 2);
+  const json = await resp.json();
+  const klines = json?.data?.klines;
+  if (!Array.isArray(klines)) throw new Error('数据格式异常');
+  const parsed = [];
+  for (const line of klines) {
+    const p = String(line).split(','); if (p.length < 6) continue;
+    const bar = { date:p[0], open:parseFloat(p[1]), close:parseFloat(p[2]), high:parseFloat(p[3]), low:parseFloat(p[4]), volume:parseFloat(p[5]) || 0 };
+    const amt = parseFloat(p[6]); if (isFinite(amt) && amt > 0) bar.amount = amt;
+    if (bar.date && isFinite(bar.open) && isFinite(bar.close) && isFinite(bar.low) && isFinite(bar.high)) parsed.push(bar);
+  }
+  return parsed;
+}
+// 源3：腾讯备用代理（CORS 放行）
+async function fetchKlineSourceTencentProxy(symbol, startDate, endDate) {
+  const param = startDate ? symbol + ',day,' + startDate + ',' + endDate + ',640,qfq' : symbol + ',day,,' + endDate + ',640,qfq';
+  const resp = await fetchWithRetry('https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get?param=' + param, {}, 2);
+  const json = await resp.json();
+  const stockData = json?.data?.[symbol]; if (!stockData) throw new Error('数据格式异常');
+  const bars = parseTencentKlines(stockData); if (!bars) throw new Error('数据格式异常');
+  return bars;
+}
+// 多源兜底：第1源失败自动切换第2/第3源，全部失败才抛错
+let _klineSourceName = '';
+async function fetchRangeFromNetwork(symbol, startDate, endDate) {
+  if (!navigator.onLine) throw new Error('OFFLINE');
+  const sources = [
+    ['腾讯', fetchKlineSourceTencent],
+    ['东方财富', fetchKlineSourceEastmoney],
+    ['腾讯备用', fetchKlineSourceTencentProxy]
+  ];
+  const errors = []; let gotEmpty = false;
+  for (const [name, fn] of sources) {
+    try {
+      const data = await fn(symbol, startDate, endDate);
+      if (Array.isArray(data) && data.length > 0) { _klineSourceName = name; return data; }
+      if (Array.isArray(data)) gotEmpty = true; // 该区间确实无K线（如非交易日）
+    } catch (e) { errors.push(name + '·' + ((e && e.message) || '请求失败')); }
+  }
+  if (gotEmpty) { _klineSourceName = ''; return []; }
+  throw new Error(errors.join(' / '));
 }
 async function fetchAllFromNetwork(symbol, earliestDate, onProgress) {
   let allData = []; let cursorEnd = getTodayLocalStr(); const EARLIEST = earliestDate || '2010-01-01';
@@ -1545,9 +1607,7 @@ async function fetchStockName(symbol) {
 // 分时数据
 // ============================================================
 let _minuteCache = { symbol: null, date: null, data: null, ts: 0 };
-async function fetchMinuteData(symbol) {
-  const todayStr = getTodayLocalStr();
-  if (_minuteCache.symbol === symbol && _minuteCache.date === todayStr && Date.now() - _minuteCache.ts < 15000) return _minuteCache.data;
+async function fetchMinuteFromTencent(symbol) {
   const resp = await fetchWithRetry('https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=' + symbol, {});
   const json = await resp.json(); const rawNode = json?.data?.[symbol]; const node = rawNode?.data;
   if (!node) throw new Error('分时数据格式异常');
@@ -1572,12 +1632,49 @@ async function fetchMinuteData(symbol) {
     if (Array.isArray(qtArr)) prevClose = parseFloat(qtArr[4]);
     else if (rawNode && rawNode.qt && rawNode.qt.prec) prevClose = parseFloat(rawNode.qt.prec);
   }
-  if (!isFinite(prevClose) || prevClose <= 0) prevClose = (bars.length > 0 ? bars[0].price : 0);
+  return { date: dateStr, bars, prevClose };
+}
+// 分时备用源：东方财富（字段 时间,开,收,高,低,分钟量(手),成交额,均价）
+async function fetchMinuteFromEastmoney(symbol) {
+  const secid = toSecid(symbol); if (!secid) throw new Error('secid 映射失败');
+  const url = 'https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid
+    + '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1';
+  const resp = await fetchWithRetry(url, {}, 2);
+  const json = await resp.json();
+  const node = json?.data;
+  if (!node || !Array.isArray(node.trends) || node.trends.length === 0) throw new Error('分时数据为空');
+  const bars = []; let cumVol = 0, cumAmount = 0;
+  for (const line of node.trends) {
+    const p = String(line).split(','); if (p.length < 8) continue;
+    const price = parseFloat(p[2]); if (!isFinite(price)) continue;
+    const vol = Math.max(0, parseFloat(p[5]) || 0);
+    const amount = parseFloat(p[6]) || 0;
+    cumVol += vol; cumAmount += amount;
+    const avg = parseFloat(p[7]);
+    bars.push({ time: p[0].slice(11, 16), price, avg: isFinite(avg) && avg > 0 ? +avg.toFixed(3) : (bars.length ? bars[bars.length-1].avg : price), vol, cumVol, cumAmount });
+  }
+  if (bars.length === 0) throw new Error('分时数据为空');
+  const date = String(node.trends[0]).slice(0, 10);
+  const prevClose = parseFloat(node.preClose);
+  return { date, bars, prevClose };
+}
+async function fetchMinuteData(symbol) {
+  const todayStr = getTodayLocalStr();
+  if (_minuteCache.symbol === symbol && _minuteCache.date === todayStr && Date.now() - _minuteCache.ts < 15000) return _minuteCache.data;
+  // 多源兜底：腾讯失败自动切东方财富
+  let result = null; let lastErr = null;
+  try { result = await fetchMinuteFromTencent(symbol); } catch (e) { lastErr = e; }
+  if (!result || !result.bars || result.bars.length === 0) {
+    try { result = await fetchMinuteFromEastmoney(symbol); } catch (e) { if (!lastErr) lastErr = e; }
+  }
+  if (!result || !result.bars || result.bars.length === 0) throw lastErr || new Error('分时数据格式异常');
+  let prevClose = result.prevClose;
+  if (!isFinite(prevClose) || prevClose <= 0) prevClose = (result.bars.length > 0 ? result.bars[0].price : 0);
   if (isFinite(prevClose) && prevClose > 0 && _quoteCache.symbol === symbol && _quoteCache.data && _quoteCache.data.prevClose > 0) {
     // 与实时报价昨收交叉校验，避免分时涨跌幅失真
     prevClose = _quoteCache.data.prevClose;
   }
-  const result = { date: dateStr, bars, prevClose };
+  result.prevClose = prevClose;
   _minuteCache = { symbol, date: todayStr, data: result, ts: Date.now() };
   return result;
 }
@@ -1990,19 +2087,19 @@ function renderMinuteSignalPanel() {
     if (isNew) { s._shown = true; freshSigs.push(s); }
     if (s.type === 'buy') {
       if (s.reverse) {
-        cards.push('<div class="signal-card"><div><div class="label">T回补(反T) · ' + s.time + ' · ' + s.reason + '</div><div class="value">回补 ¥' + s.price.toFixed(2) + ' · 高抛价 ¥' + (s.sellPrice || 0).toFixed(2) + ' · 价差 <span style="color:#ef5350">' + sig(s.profitPct) + '</span><br/><span style="font-weight:400;color:#8faec9;">路由: ' + (s.route || s.reason || '-') + '</span></div></div></div>');
+        cards.push('<div class="signal-card"><div><div class="label">T回补(反T) · ' + s.time + ' · ' + s.reason + '</div><div class="value">回补 ¥' + s.price.toFixed(2) + ' · 高抛价 ¥' + (s.sellPrice || 0).toFixed(2) + ' · 价差 <span style="color:#ef5350">' + sig(s.profitPct) + '</span></div></div></div>');
       } else {
         const target = s.price * (1 + (s.targetPct || prof.minSpread) / 100);
         const stop = s.price * (1 - (s.stopPct || prof.stopLoss) / 100);
-        cards.push('<div class="signal-card active-buy"><div><div class="label">T买点 · ' + s.time + ' · 评分 ' + (s.score || 0) + ' · ' + s.reason + '</div><div class="value">买入 ¥' + s.price.toFixed(2) + ' · 目标 ¥' + target.toFixed(2) + ' (+' + (s.targetPct || prof.minSpread) + '%) · 止损 ¥' + stop.toFixed(2) + '<br/><span style="font-weight:400;color:#8faec9;">路由: ' + (s.route || '-') + '</span></div></div></div>');
+        cards.push('<div class="signal-card active-buy"><div><div class="label">T买点 · ' + s.time + ' · 评分 ' + (s.score || 0) + ' · ' + s.reason + '</div><div class="value">买入 ¥' + s.price.toFixed(2) + ' · 目标 ¥' + target.toFixed(2) + ' (+' + (s.targetPct || prof.minSpread) + '%) · 止损 ¥' + stop.toFixed(2) + '</div></div></div>');
       }
     } else if (s.reverse) {
       const buyTarget = s.price * (1 - (s.targetPct || prof.minSpread) / 100);
       const stop = s.price * (1 + (s.stopPct || prof.stopLoss) / 100);
-      cards.push('<div class="signal-card active-sell"><div><div class="label">T高抛(反T) · ' + s.time + ' · 评分 ' + (s.score || 0) + ' · ' + s.reason + '</div><div class="value">卖出 ¥' + s.price.toFixed(2) + ' · 回补目标 ¥' + buyTarget.toFixed(2) + ' (-' + (s.targetPct || prof.minSpread) + '%) · 止损 ¥' + stop.toFixed(2) + '<br/><span style="font-weight:400;color:#8faec9;">路由: ' + (s.route || '-') + '</span></div></div></div>');
+      cards.push('<div class="signal-card active-sell"><div><div class="label">T高抛(反T) · ' + s.time + ' · 评分 ' + (s.score || 0) + ' · ' + s.reason + '</div><div class="value">卖出 ¥' + s.price.toFixed(2) + ' · 回补目标 ¥' + buyTarget.toFixed(2) + ' (-' + (s.targetPct || prof.minSpread) + '%) · 止损 ¥' + stop.toFixed(2) + '</div></div></div>');
     } else {
       const profitColor = s.profitPct >= 0 ? '#ef5350' : '#26a69a';
-      cards.push('<div class="signal-card active-sell"><div><div class="label">T卖点 · ' + s.time + ' · ' + s.reason + '</div><div class="value">卖出 ¥' + s.price.toFixed(2) + ' · 成本 ¥' + (s.buyPrice || 0).toFixed(2) + ' · 价差 <span style="color:' + profitColor + '">' + sig(s.profitPct) + '</span><br/><span style="font-weight:400;color:#8faec9;">路由: ' + (s.route || '-') + '</span></div></div></div>');
+      cards.push('<div class="signal-card active-sell"><div><div class="label">T卖点 · ' + s.time + ' · ' + s.reason + '</div><div class="value">卖出 ¥' + s.price.toFixed(2) + ' · 成本 ¥' + (s.buyPrice || 0).toFixed(2) + ' · 价差 <span style="color:' + profitColor + '">' + sig(s.profitPct) + '</span></div></div></div>');
     }
   });
   if (tTradeSignals.length === 0 && !_tTradeOpen) {
@@ -2018,8 +2115,9 @@ function renderMinuteSignalPanel() {
 // ============================================================
 async function loadStockData(code, name, forceFullRefresh) {
   const symbol = getSymbolWithPrefix(code); currentSymbol = symbol; currentCode = code;
-  if (_mockRetryCode !== code) { _mockRetryCode = code; _mockRetryCount = 0; if (_mockRetryTimer) { clearTimeout(_mockRetryTimer); _mockRetryTimer = null; } }
+  if (_offlineRetryCode !== code) { _offlineRetryCode = code; _offlineRetryCount = 0; if (_offlineRetryTimer) { clearTimeout(_offlineRetryTimer); _offlineRetryTimer = null; } }
   currentName = (name || '').trim();
+  _klineSourceName = '';
   // 未知名先显示代码，查到名称后再替换
   if (stockTitle) stockTitle.textContent = currentName || code;
   if (stockLabel) stockLabel.textContent = symbol.toUpperCase();
@@ -2050,8 +2148,9 @@ async function loadStockData(code, name, forceFullRefresh) {
   }
   let localData = await loadStockFromLocal(code);
   let needFullRefresh = !!forceFullRefresh; let localIsComplete = true;
+  const MIN_USABLE_BARS = 240; // 低于该数量视为不可用缓存（指标周期不足），需全量拉取
   if (localData && localData.length > 0) {
-    if (localData[0].date > '2015-01-01' || localData.length < 800) localIsComplete = false;
+    if (localData.length < MIN_USABLE_BARS) localIsComplete = false;
     const sample = localData[localData.length - 1];
     if (sample && typeof sample.volume !== 'number') { statusEl.innerHTML = '<span class="badge orange">本地数据缺少成交量字段</span> 需刷新'; needFullRefresh = true; }
     // 本地缓存若与实时报价价格严重偏离（多为历史演示数据污染），直接丢弃重拉
@@ -2063,16 +2162,25 @@ async function loadStockData(code, name, forceFullRefresh) {
   if (localData && localData.length > 0 && !needFullRefresh) {
     if (!validateBars(localData)) { needFullRefresh = true; localData = null; }
     else if (!localIsComplete) needFullRefresh = true;
-    else statusEl.innerHTML = '<span class="badge green">本地数据</span> ' + localData.length + ' 条';
+    else statusEl.innerHTML = '<span class="badge green">本地数据</span> ' + localData.length + ' 条 · 核对最新性...';
   } else if (!needFullRefresh) statusEl.innerHTML = '<span class="badge orange">首次加载</span> 拉取最近数据...';
-  let networkData = []; let usedMock = false; let networkError = null;
+  const hadLocalCache = !!(localData && localData.length > 0) && !needFullRefresh;
+  let networkData = []; let networkError = null;
+  const todayStr = getTodayLocalStr();
   try {
     if (!navigator.onLine) throw new Error('OFFLINE');
-    if (needFullRefresh || !localData || localData.length === 0) { networkData = await fetchRangeFromNetwork(symbol, '', getTodayLocalStr()); localData = null; }
-    else { const lastDate = localData[localData.length-1].date; const nextStart = new Date(lastDate); nextStart.setDate(nextStart.getDate() + 1); networkData = await fetchRangeFromNetwork(symbol, formatLocalDate(nextStart), getTodayLocalStr()); }
+    if (needFullRefresh || !localData || localData.length === 0) {
+      // 首次加载 / 缓存失效：拉取最近 640 根K线
+      networkData = await fetchRangeFromNetwork(symbol, '', todayStr); localData = null;
+    } else {
+      // 核对最新性并增量更新：从本地最后一根K线的次日开始，只补新增K线
+      const lastDate = localData[localData.length - 1].date;
+      const nextStart = new Date(lastDate); nextStart.setDate(nextStart.getDate() + 1);
+      const nextStartStr = formatLocalDate(nextStart);
+      if (nextStartStr <= todayStr) networkData = await fetchRangeFromNetwork(symbol, nextStartStr, todayStr);
+    }
   } catch (e) {
-    networkError = e;
-    if (!localData || localData.length === 0) { networkData = generateMockData(symbol); usedMock = true; }
+    networkError = e; networkData = [];
   }
   // 请求期间用户已切换到其它股票：丢弃本次结果，避免行情串号
   if (currentCode !== code) return false;
@@ -2098,39 +2206,71 @@ async function loadStockData(code, name, forceFullRefresh) {
       }
     }
   }
-  let mergedData;
+  let mergedData; let addedCount = 0;
   if (localData && localData.length > 0) {
-    if (networkData.length > 0) { const existing = new Set(localData.map(b => b.date)); const newBars = networkData.filter(b => !existing.has(b.date)); mergedData = localData.concat(newBars).sort((a,b) => a.date.localeCompare(b.date)); }
-    else mergedData = localData;
+    if (networkData.length > 0) {
+      // 增量合并：新增日期追加；已存在日期用网络最新K线覆盖（处理盘中未收盘K线变化）
+      const byDate = new Map(localData.map(b => [b.date, b]));
+      for (const nb of networkData) {
+        if (byDate.has(nb.date)) Object.assign(byDate.get(nb.date), nb);
+        else { byDate.set(nb.date, nb); addedCount++; }
+      }
+      mergedData = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+    } else mergedData = localData;
   } else mergedData = networkData;
-  if (!mergedData || mergedData.length === 0) { statusEl.innerHTML = '<span class="badge red">无数据</span> 网络异常且无本地缓存，请联网后重试'; return false; }
-  // 演示数据绝不写入本地缓存，避免污染后续行情
-  if (!usedMock) await saveStockToLocal(code, mergedData, currentName);
+  if (!mergedData || mergedData.length === 0) {
+    const errMsg = networkError ? (networkError.message === 'OFFLINE' ? '当前处于离线状态' : ('网络请求失败：' + networkError.message)) : '暂无行情';
+    // 无本地缓存且网络失败：清屏 + 清空图表，禁止继续显示上一只股票的K线（避免误读为错误数据）
+    rawDailyData = []; dataLoaded = false; minuteData = null; futureBars = [];
+    buySignals = []; sellSignals = []; clearFutureSignals(); resetTTradeState();
+    clearIndicatorCache(); _periodCache.period = null; _periodCache.lastTotal = 0;
+    _renderKlineChart._structuralKey = null; _renderKlineChart._valuesKey = null; _renderKlineChart._values = null; _renderKlineChart._dates = null; _renderKlineChart._indicatorMeta = null;
+    _infoBoxCache.barsRef = null; _infoBoxCache.maList = null; _infoBoxCache.meta = null; _lastInfoBoxKey = '';
+    const inlineEl = document.getElementById('inlineInfo'); if (inlineEl) inlineEl.innerHTML = '';
+    const ohlcEl = document.getElementById('ohlcInfo'); if (ohlcEl) ohlcEl.innerHTML = '';
+    try { myChart.clear(); } catch (e) {}
+    try {
+      myChart.setOption({ backgroundColor: '#0a0e14', title: { text: '暂无行情数据', subtext: errMsg + ' · 网络恢复后自动重试', left: 'center', top: 'center', textStyle: { color: '#7a8b9e', fontSize: 15, fontWeight: 'normal' }, subtextStyle: { color: '#6e7e8f', fontSize: 12 } } }, true);
+    } catch (e) {}
+    renderQuoteInfo(null);
+    if (signalPanel) {
+      const html = '<div class="empty-signal">暂无行情数据 · 网络恢复后自动重试</div>';
+      _lastSignalPanelHtml = html; signalPanel.innerHTML = html;
+    }
+    statusEl.innerHTML = '<span class="badge red">暂无行情数据</span> ' + errMsg + ' · 该股票无本地缓存，网络恢复后自动重试';
+    scheduleOfflineRetry(code);
+    return false;
+  }
+  // 增量保存：新增/刷新K线写入本地缓存（首次加载/全量刷新保存全部）
+  if (networkData.length > 0 || !localData || needFullRefresh) await saveStockToLocal(code, mergedData, currentName);
   rawDailyData = mergedData; dataLoaded = true; clearIndicatorCache(); invalidateBarsHash(rawDailyData); _periodCache.period = null;
   _periodConvertCache.delete(mergedData);
   const saved = loadSignalsFromStorage(code); buySignals = saved.buys; sellSignals = saved.sells; ensureSignalIds();
   stockLabel.textContent = symbol.toUpperCase(); stockTitle.textContent = currentName || code;
   updatePriceInputs();
-  if (usedMock) {
-    statusEl.innerHTML = '<span class="badge red">网络请求失败</span> <span class="badge orange">当前为演示数据（未保存）</span> ' + (networkError && networkError.message ? networkError.message : '') + ' · 请联网后点击"数据更新"';
-    // 网络恢复后自动重试拉取真实数据（最多 3 次），避免长期停留在演示数据
-    if (_mockRetryCount < 3) {
-      if (_mockRetryTimer) clearTimeout(_mockRetryTimer);
-      _mockRetryTimer = setTimeout(() => {
-        _mockRetryTimer = null;
-        if (currentCode !== code) return;
-        if (!navigator.onLine) return;
-        _mockRetryCount++;
-        statusEl.innerHTML = '<span class="badge blue">网络已恢复</span> 重新拉取真实行情...';
-        loadStockData(code, currentName, true);
-      }, 15000);
-    }
+  const lastBar = mergedData[mergedData.length - 1];
+  if (networkError) {
+    // 网络不可用：使用本地缓存显示，不伪造数据；网络恢复后自动增量补全
+    _offlineRetryCount = 0;
+    statusEl.innerHTML = '<span class="badge orange">离线模式</span> <span class="badge">本地缓存 ' + mergedData.length + ' 条</span> <span class="badge">最新 ' + lastBar.date + '</span> · 网络恢复后自动增量补全' + buildSignalStatusText(currentPeriod);
+    scheduleOfflineRetry(code);
   } else {
-    _mockRetryCount = 0;
-    statusEl.innerHTML = '<span class="badge green">加载完成</span> <span class="badge">📊 ' + mergedData.length + ' 条</span> <span class="badge">' + mergedData[0].date + ' ~ ' + mergedData[mergedData.length-1].date + ' · 前复权</span>' + buildSignalStatusText(currentPeriod);
+    _offlineRetryCount = 0;
+    if (addedCount > 0) {
+      statusEl.innerHTML = '<span class="badge green">增量更新 +' + addedCount + ' 条</span> <span class="badge">📊 ' + mergedData.length + ' 条</span> <span class="badge">' + mergedData[0].date + ' ~ ' + lastBar.date + ' · 前复权</span>' + buildSignalStatusText(currentPeriod);
+    } else if (!hadLocalCache) {
+      statusEl.innerHTML = '<span class="badge green">加载完成</span> <span class="badge">📊 ' + mergedData.length + ' 条</span> <span class="badge">' + mergedData[0].date + ' ~ ' + lastBar.date + ' · 前复权</span>' + buildSignalStatusText(currentPeriod);
+    } else if (networkData.length > 0) {
+      statusEl.innerHTML = '<span class="badge green">已同步今日行情</span> <span class="badge">📊 ' + mergedData.length + ' 条</span> <span class="badge">' + mergedData[0].date + ' ~ ' + lastBar.date + ' · 前复权</span>' + buildSignalStatusText(currentPeriod);
+    } else {
+      statusEl.innerHTML = '<span class="badge green">已是最新</span> <span class="badge">📊 ' + mergedData.length + ' 条</span> <span class="badge">' + mergedData[0].date + ' ~ ' + lastBar.date + ' · 前复权</span>' + buildSignalStatusText(currentPeriod);
+    }
+  }
+  if (!networkError && _klineSourceName && _klineSourceName !== '腾讯') {
+    statusEl.innerHTML += ' <span class="badge blue">备用源 ' + _klineSourceName + '</span>';
   }
   const initPeriodBars = convertToPeriod(rawDailyData, currentPeriod); scheduleBatchPrecompute(initPeriodBars);
-  if (!usedMock && mergedData.length < 800) {
+  if (!networkError && mergedData.length < 800) {
     setTimeout(async () => {
       try {
         statusEl.innerHTML += ' <span class="badge blue">后台补全历史...</span>';
@@ -2155,19 +2295,32 @@ async function loadStockData(code, name, forceFullRefresh) {
   return true;
 }
 
-function generateMockData(symbol) {
-  // 仅在网络完全不可用且无本地缓存时使用；不写入本地缓存
-  const mock = []; let basePrice = 28; const startDate = new Date(); startDate.setDate(startDate.getDate() - 500);
-  for (let i = 0; i < 500; i++) {
-    const d = new Date(startDate); d.setDate(startDate.getDate() + i);
-    const open = basePrice + (Math.random()-0.5)*1.5; const close = open + (Math.random()-0.5)*2;
-    const high = Math.max(open,close) + Math.random()*1.2; const low = Math.min(open,close) - Math.random()*1.2;
-    const volume = Math.round(50000 + Math.random() * 150000);
-    mock.push({ date:formatLocalDate(d), open:+open.toFixed(2), close:+close.toFixed(2), low:+low.toFixed(2), high:+high.toFixed(2), volume, demo:true });
-    basePrice = close;
-  }
-  return mock;
+// 离线自动重试：网络恢复后立即增量补全（绝不生成演示数据）
+function scheduleOfflineRetry(code) {
+  if (_offlineRetryTimer) return;
+  if (_offlineRetryCount >= 20) return;
+  _offlineRetryTimer = setTimeout(() => {
+    _offlineRetryTimer = null;
+    if (currentCode !== code) return;
+    _offlineRetryCount++;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) { scheduleOfflineRetry(code); return; }
+    if (rawDailyData.length === 0) statusEl.innerHTML = '<span class="badge blue">网络已恢复</span> 正在拉取行情...';
+    loadStockData(code, currentName, false).then(ok => {
+      if (!ok || currentCode !== code) return;
+      switchPeriod(currentPeriod);
+    }).catch(() => {});
+  }, 15000);
 }
+window.addEventListener('online', () => {
+  if (!currentCode) return;
+  if (_offlineRetryTimer) { clearTimeout(_offlineRetryTimer); _offlineRetryTimer = null; }
+  _offlineRetryCount = 0;
+  if (rawDailyData.length === 0) statusEl.innerHTML = '<span class="badge blue">网络已恢复</span> 正在拉取行情...';
+  loadStockData(currentCode, currentName, false).then(ok => {
+    if (!ok) return;
+    switchPeriod(currentPeriod);
+  }).catch(() => {});
+});
 
 // ============================================================
 // 渲染调度（优化：最小间隔合并）
@@ -2269,9 +2422,16 @@ function renderMinuteChart() {
 }
 // ============================================================
 function _renderKlineChart(forceRebuild) {
-  if (!dataLoaded && rawDailyData.length === 0) return;
   const { baseData, allBars } = getPeriodData();
-  if (!allBars || allBars.length === 0) return;
+  if (!dataLoaded || !allBars || allBars.length === 0) {
+    // 无数据：清屏并显示空态，禁止残留上一周期 / 上一只股票的K线与MA
+    _renderKlineChart._structuralKey = null; _renderKlineChart._indicatorMeta = null; _renderKlineChart._valuesKey = null;
+    try {
+      myChart.clear();
+      myChart.setOption({ backgroundColor: '#0a0e14', title: { text: '暂无行情数据', subtext: '网络恢复后自动重试', left: 'center', top: 'center', textStyle: { color: '#7a8b9e', fontSize: 15, fontWeight: 'normal' }, subtextStyle: { color: '#6e7e8f', fontSize: 12 } } }, true);
+    } catch (e) {}
+    return;
+  }
 
   const structuralKey = currentCode + '_' + currentPeriod + '_' + subIndicator + '_' + chartSettings.maPeriods.join(',') + '_' + chartSettings.volPeriods.join(',') + '_' + (futureBars.length > 0 ? 'F' : '');
   const needRebuild = forceRebuild || _renderKlineChart._structuralKey !== structuralKey;
@@ -2294,6 +2454,8 @@ function _renderKlineChart(forceRebuild) {
   const oldMeta = _renderKlineChart._indicatorMeta;
   const canIncremental = !needRebuild
     && oldMeta
+    && oldMeta.period === currentPeriod
+    && oldMeta.code === currentCode
     && oldMeta.subIndicator === subIndicator
     && oldMeta.maPeriods === chartSettings.maPeriods.join(',')
     && oldMeta.volPeriods === chartSettings.volPeriods.join(',')
@@ -2344,6 +2506,8 @@ function _renderKlineChart(forceRebuild) {
   _renderKlineChart._indicatorMeta = {
     len: allBars.length,
     firstDate: allBars[0].date,
+    period: currentPeriod,
+    code: currentCode,
     subIndicator,
     maPeriods: chartSettings.maPeriods.join(','),
     volPeriods: chartSettings.volPeriods.join(','),
@@ -2504,6 +2668,8 @@ xAxis: [
   };
 
   // 始终整体重建：结构/数据长度变化时避免旧序列与旧坐标轴残留叠加（曾导致月线MA叠加、补全历史后画面错乱）
+  // 重建前先 clear()，彻底清空上一周期画布，杜绝 MA 线残影
+  if (needRebuild) { try { myChart.clear(); } catch (e) {} }
   myChart.setOption(option, { notMerge: true, lazyUpdate: false });
   updateSignalPanel();
   _suppressDataZoomEvent = true;
@@ -3977,7 +4143,8 @@ document.addEventListener('keyup', (e) => { if (!['ArrowLeft','ArrowRight','Arro
 window.addEventListener('blur', () => { stopKbdHold(); });
 
 async function switchPeriod(period) {
-  currentPeriod = period; _renderKlineChart._structuralKey = null; _renderKlineChart._indicatorMeta = null; cursorIndex = -1; clickedIndex = -1; _lastInfoIdx = -1; _lastInfoBoxKey = ''; _periodCache.period = null; _periodCache.lastTotal = 0;
+  currentPeriod = period; _renderKlineChart._structuralKey = null; _renderKlineChart._indicatorMeta = null; _renderKlineChart._valuesKey = null; _renderKlineChart._values = null; _renderKlineChart._dates = null; cursorIndex = -1; clickedIndex = -1; _lastInfoIdx = -1; _lastInfoBoxKey = ''; _periodCache.period = null; _periodCache.lastTotal = 0;
+  try { myChart.clear(); } catch (e) {}
   document.querySelectorAll('.period-group button').forEach(b => b.classList.remove('active'));
   document.getElementById('btn' + period.charAt(0).toUpperCase() + period.slice(1)).classList.add('active');
   updateReviewInputForPeriod(period); futureBars = []; clearFutureSignals(); clearIndicatorCache();
@@ -4202,7 +4369,12 @@ document.getElementById('forceRefreshBtn').addEventListener('click', async () =>
   const initCode = firstWatch && firstWatch.code ? String(firstWatch.code) : '399006';
   const initName = firstWatch && firstWatch.name ? firstWatch.name : (initCode === '399006' ? '创业板指' : '');
   try { await Promise.race([loadStock(initCode, initName), new Promise((_, rej) => setTimeout(() => rej(new Error('LOAD_TIMEOUT')), 25000))]); log('股票加载完成'); }
-  catch (e) { console.warn('加载超时', e); log('加载超时，使用兜底数据'); if (rawDailyData.length === 0) { rawDailyData = generateMockData(getSymbolWithPrefix(initCode)); dataLoaded = true; stockLabel.textContent = getSymbolWithPrefix(initCode).toUpperCase(); stockTitle.textContent = initName || initCode; updatePriceInputs(); renderChart(false, true); } }
+  catch (e) {
+    console.warn('加载超时', e);
+    log('加载超时，等待网络恢复后自动重试');
+    if (rawDailyData.length === 0) statusEl.innerHTML = '<span class="badge red">行情加载超时</span> 不会显示演示数据 · 网络恢复后自动重试';
+    scheduleOfflineRetry(initCode);
+  }
   log('启动实时更新');
   startRealtimeUpdater();
   setTimeout(() => { renderWatchlist(); renderStrategySelect(); renderSellStrategySelect(); }, 0);
