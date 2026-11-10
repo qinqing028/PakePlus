@@ -1,10 +1,9 @@
 <!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<html><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>专用光缆管理系统</title>
-    <link rel="stylesheet" href="libs/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="libs/leaflet/leaflet.css">
     <script src="libs/leaflet/leaflet.js"></script>
     <script src="libs/xlsx/xlsx.full.min.js"></script>
     <script src="libs/docx-preview/jszip.min.js"></script>
@@ -406,12 +405,14 @@
                 <button class="btn btn-info" id="mapPathBtn" title="重新配置电子地图文件夹">地图路径</button>
                 <button class="btn btn-info" id="docPathBtn" title="重新配置文档存储文件夹">文档路径</button>
                 <button class="btn btn-info" id="selectFileBtn" title="重新配置数据源">数据路径</button>
-                <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none;" />
+                <button class="btn btn-info" id="setDefaultCenterBtn" title="将当前地图视图设为默认中心点（超级管理员）">默认中心</button>
+                <button class="btn btn-info" id="zoomRangeBtn" title="配置地图缩放最小与最大级别（超级管理员）">缩放</button>
+                <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none;">
                 <div class="dropdown-trigger" id="dropdownTrigger">
                     <span>光缆</span>
                     <span class="arrow">▼</span>
                     <div class="dropdown-content" id="dropdownContent">
-                        <input type="text" class="search-box" id="searchBox" placeholder="搜索光缆、类别或管井名称..." />
+                        <input type="text" class="search-box" id="searchBox" placeholder="搜索光缆、类别或管井名称...">
                         <div class="panel-title">显示 / 颜色</div>
                         <div id="routeControls"></div>
                     </div>
@@ -469,7 +470,7 @@
             <div id="mapSearchBox">
                 <div class="map-search-input-wrap">
                     <span class="map-search-icon">🔍</span>
-                    <input type="text" id="mapSearchInput" placeholder="搜索管井名称..." autocomplete="off" />
+                    <input type="text" id="mapSearchInput" placeholder="搜索管井名称..." autocomplete="off">
                     <button class="map-search-clear" id="mapSearchClear" title="清除">✕</button>
                 </div>
                 <div id="mapSearchResults"></div>
@@ -496,7 +497,7 @@
                 <div id="pathConfigDisplay">尚未选择</div>
                 <div class="path-config-btns">
                     <button id="pathConfigSelectBtn">选择文件</button>
-                    <button id="pathConfigConfirmBtn" disabled>确认</button>
+                    <button id="pathConfigConfirmBtn" disabled="">确认</button>
                 </div>
                 <div id="pathConfigError" class="path-config-error"></div>
                 <div id="pathConfigHint" class="path-config-hint" style="display:none;"></div>
@@ -506,11 +507,11 @@
         <div id="wellEditOverlay" class="edit-overlay">
             <div class="edit-dialog">
                 <h3>编辑管井信息</h3>
-                <div class="form-row"><label>管井编号：</label><input type="text" id="wellEditName" placeholder="可留空" /></div>
-                <div class="form-row"><label>管井名称：</label><div style="flex:1;display:flex;flex-direction:column;"><input type="text" id="wellEditDesc" /><div id="wellEditDescHint" style="font-size:12px;color:#ff4d4f;margin-top:4px;min-height:16px;display:none;"></div></div></div>
-                <div class="form-row"><label>纬度：</label><input type="text" id="wellEditLat" /></div>
-                <div class="form-row"><label>经度：</label><input type="text" id="wellEditLng" /></div>
-                <div class="form-row"><label>重要信息：</label><input type="text" id="wellEditInfo" /></div>
+                <div class="form-row"><label>管井编号：</label><input type="text" id="wellEditName" placeholder="可留空"></div>
+                <div class="form-row"><label>管井名称：</label><div style="flex:1;display:flex;flex-direction:column;"><input type="text" id="wellEditDesc"><div id="wellEditDescHint" style="font-size:12px;color:#ff4d4f;margin-top:4px;min-height:16px;display:none;"></div></div></div>
+                <div class="form-row"><label>纬度：</label><input type="text" id="wellEditLat"></div>
+                <div class="form-row"><label>经度：</label><input type="text" id="wellEditLng"></div>
+                <div class="form-row"><label>重要信息：</label><input type="text" id="wellEditInfo"></div>
                 <div class="edit-btns"><button id="wellEditCancel">取消</button><button class="primary" id="wellEditConfirm">确认修改</button></div>
             </div>
         </div>
@@ -518,21 +519,32 @@
         <div id="wellAddOverlay" class="edit-overlay">
             <div class="edit-dialog">
                 <h3>新增管井</h3>
-                <div class="form-row"><label>管井编号：</label><input type="text" id="wellAddName" placeholder="可留空" /></div>
-                <div class="form-row"><label>管井名称：</label><div style="flex:1;display:flex;flex-direction:column;"><input type="text" id="wellAddDesc" /><div id="wellAddDescHint" style="font-size:12px;color:#ff4d4f;margin-top:4px;min-height:16px;display:none;"></div></div></div>
-                <div class="form-row"><label>纬度：</label><input type="text" id="wellAddLat" /></div>
-                <div class="form-row"><label>经度：</label><input type="text" id="wellAddLng" /></div>
-                <div class="form-row"><label>重要信息：</label><input type="text" id="wellAddInfo" /></div>
+                <div class="form-row"><label>管井编号：</label><input type="text" id="wellAddName" placeholder="可留空"></div>
+                <div class="form-row"><label>管井名称：</label><div style="flex:1;display:flex;flex-direction:column;"><input type="text" id="wellAddDesc"><div id="wellAddDescHint" style="font-size:12px;color:#ff4d4f;margin-top:4px;min-height:16px;display:none;"></div></div></div>
+                <div class="form-row"><label>纬度：</label><input type="text" id="wellAddLat"></div>
+                <div class="form-row"><label>经度：</label><input type="text" id="wellAddLng"></div>
+                <div class="form-row"><label>重要信息：</label><input type="text" id="wellAddInfo"></div>
                 <div class="edit-btns"><button id="wellAddCancel">取消</button><button class="primary" id="wellAddConfirm">确认新增</button></div>
+            </div>
+        </div>
+
+        <div id="zoomRangeOverlay" class="edit-overlay">
+            <div class="edit-dialog">
+                <h3>配置地图缩放范围</h3>
+                <div class="form-row"><label>最小缩放：</label><input type="number" id="zoomMinInput" min="0" max="24" step="1"></div>
+                <div class="form-row"><label>最大缩放：</label><input type="number" id="zoomMaxInput" min="1" max="24" step="1"></div>
+                <div class="form-row"><label>白底模式最大：</label><input type="number" id="zoomWhiteMaxInput" min="1" max="24" step="1"></div>
+                <div style="font-size:12px;color:#888;margin:6px 0 4px 100px;">说明：默认值 最小=7，最大=18，白底模式最大=20。设置后立即生效并持久保存。</div>
+                <div class="edit-btns"><button id="zoomRangeCancel">取消</button><button id="zoomRangeReset">恢复默认</button><button class="primary" id="zoomRangeConfirm">保存</button></div>
             </div>
         </div>
 
         <div id="newCableOverlay" class="edit-overlay">
             <div class="edit-dialog">
                 <h3>新增光缆</h3>
-                <div class="form-row"><label>类别：</label><input type="text" id="newCableCategory" placeholder="例如：一级干线" /></div>
-                <div class="form-row"><label>光缆名称：</label><input type="text" id="newCableName" /></div>
-                <div class="form-row"><label>文件名：</label><input type="text" id="newCableFile" /></div>
+                <div class="form-row"><label>类别：</label><input type="text" id="newCableCategory" placeholder="例如：一级干线"></div>
+                <div class="form-row"><label>光缆名称：</label><input type="text" id="newCableName"></div>
+                <div class="form-row"><label>文件名：</label><input type="text" id="newCableFile"></div>
                 <div class="edit-btns"><button id="newCableCancel">取消</button><button class="primary" id="newCableConfirm">确认，开始选点</button></div>
             </div>
         </div>
@@ -540,9 +552,9 @@
         <div id="cableEditOverlay" class="edit-overlay">
             <div class="edit-dialog">
                 <h3>修改光缆信息</h3>
-                <div class="form-row"><label>类别：</label><input type="text" id="cableEditCategory" placeholder="例如：一级干线" /></div>
-                <div class="form-row"><label>光缆名称：</label><div style="flex:1;display:flex;flex-direction:column;"><input type="text" id="cableEditName" /><div id="cableEditNameHint" style="font-size:12px;color:#ff4d4f;margin-top:4px;min-height:16px;display:none;"></div></div></div>
-                <div class="form-row"><label>文件名：</label><input type="text" id="cableEditFile" /></div>
+                <div class="form-row"><label>类别：</label><input type="text" id="cableEditCategory" placeholder="例如：一级干线"></div>
+                <div class="form-row"><label>光缆名称：</label><div style="flex:1;display:flex;flex-direction:column;"><input type="text" id="cableEditName"><div id="cableEditNameHint" style="font-size:12px;color:#ff4d4f;margin-top:4px;min-height:16px;display:none;"></div></div></div>
+                <div class="form-row"><label>文件名：</label><input type="text" id="cableEditFile"></div>
                 <div class="edit-btns"><button id="cableEditCancel">取消</button><button class="primary" id="cableEditConfirm">确认修改</button></div>
             </div>
         </div>
@@ -572,17 +584,17 @@
                 </div>
                 <div class="form-row">
                     <label>备份文件夹：</label>
-                    <input type="text" id="backupFolderPath" placeholder="点击下方按钮选择..." readonly />
+                    <input type="text" id="backupFolderPath" placeholder="点击下方按钮选择..." readonly="">
                 </div>
                 <div class="form-row">
                     <label>文件名：</label>
-                    <input type="text" id="backupFileName" readonly />
+                    <input type="text" id="backupFileName" readonly="">
                 </div>
                 <div class="progress-bar" id="backupProgressBar"><div class="progress-bar-inner" id="backupProgressInner"></div></div>
                 <div class="status-text" id="backupStatusText"></div>
                 <div class="edit-btns">
                     <button id="backupSelectFolderBtn">选择文件夹</button>
-                    <button class="primary" id="backupConfirmBtn" disabled>开始备份</button>
+                    <button class="primary" id="backupConfirmBtn" disabled="">开始备份</button>
                     <button id="backupCancelBtn">取消</button>
                 </div>
             </div>
@@ -601,13 +613,13 @@
                 </div>
                 <div class="form-row">
                     <label>导入文件：</label>
-                    <input type="text" id="importFilePath" placeholder="点击下方按钮选择..." readonly />
+                    <input type="text" id="importFilePath" placeholder="点击下方按钮选择..." readonly="">
                 </div>
                 <div class="progress-bar" id="importProgressBar"><div class="progress-bar-inner" id="importProgressInner"></div></div>
                 <div class="status-text" id="importStatusText"></div>
                 <div class="edit-btns">
                     <button id="importSelectFileBtn">选择文件</button>
-                    <button class="primary" id="importConfirmBtn" disabled>开始导入</button>
+                    <button class="primary" id="importConfirmBtn" disabled="">开始导入</button>
                     <button id="importCancelBtn">取消</button>
                 </div>
             </div>
@@ -646,19 +658,19 @@
             <div class="login-form">
                 <div class="login-field">
                     <label for="loginUser">用户名</label>
-                    <input type="text" id="loginUser" value="admin" autocomplete="off" />
+                    <input type="text" id="loginUser" value="admin" autocomplete="off">
                 </div>
                 <div class="login-field">
                     <label for="loginPass">密码</label>
-                    <input type="password" id="loginPass" autocomplete="off" />
+                    <input type="password" id="loginPass" autocomplete="off">
                 </div>
                 <div class="login-field modify-field" id="loginNewPassField" style="display:none;">
                     <label for="loginNewPass">新密码</label>
-                    <input type="password" id="loginNewPass" autocomplete="off" />
+                    <input type="password" id="loginNewPass" autocomplete="off">
                 </div>
                 <div class="login-field modify-field" id="loginNewPass2Field" style="display:none;">
                     <label for="loginNewPass2">确认新密码</label>
-                    <input type="password" id="loginNewPass2" autocomplete="off" />
+                    <input type="password" id="loginNewPass2" autocomplete="off">
                 </div>
                 <div id="loginError"></div>
             </div>
@@ -693,7 +705,7 @@
         const ROUTE_SHEET_NAME = '路由', NODE_SHEET_NAME = '节点';
         const NODE_NAME_IDX = 0, NODE_DESC_IDX = 1, NODE_LNG_IDX = 2, NODE_LAT_IDX = 3, NODE_INFO_IDX = 4;
         const LINE_WIDTH = 5, MID_LABEL_FONT_SIZE = 13;
-        const MIN_ZOOM = 7, MAX_ZOOM = 18, WHITE_BG_MAX_ZOOM = 20;
+        let MIN_ZOOM = 7, MAX_ZOOM = 18, WHITE_BG_MAX_ZOOM = 20;
         const ROUTE_CATEGORY_IDX = 0, ROUTE_NAME_IDX = 1, ROUTE_FILE_IDX = 2, ROUTE_NODE_START_IDX = 3;
         const KW_PENDING_JIFANG = '待建机房', KW_PENDING_MODULE = '待建模块局', KW_JIFANG = '机房', KW_MODULE = '模块局';
         const KW_PENDING = '待建';
@@ -747,6 +759,8 @@
         const MAP_FOLDER_STORAGE_KEY = 'glight_map_folder_path';
         const DOC_FOLDER_STORAGE_KEY = 'glight_doc_folder_path';
         const EXCEL_FILE_STORAGE_KEY = 'glight_excel_file_path';
+        const DEFAULT_CENTER_STORAGE_KEY = 'glight_map_default_center';
+        const ZOOM_RANGE_STORAGE_KEY = 'glight_map_zoom_range';
         const CONFIG_FILE_NAME = 'glight_config.json';
         let roadmapBaseUrl = null, currentRoadmapPath = null, docBaseDir = null, currentDocPath = null, currentExcelPath = null;
         let currentConfigType = null, pathConfigQueue = [], pathConfigShowing = false;
@@ -1364,10 +1378,51 @@
             return result;
         }
 
+        const DEFAULT_MIN_ZOOM = 7, DEFAULT_MAX_ZOOM = 18, DEFAULT_WHITE_BG_MAX_ZOOM = 20;
+        function loadZoomRange() {
+            try {
+                const saved = localStorage.getItem(ZOOM_RANGE_STORAGE_KEY);
+                if (saved) {
+                    const p = JSON.parse(saved);
+                    if (typeof p.min === 'number') MIN_ZOOM = Math.max(0, Math.min(24, p.min | 0));
+                    if (typeof p.max === 'number') MAX_ZOOM = Math.max(MIN_ZOOM + 1, Math.min(24, p.max | 0));
+                    if (typeof p.whiteMax === 'number') WHITE_BG_MAX_ZOOM = Math.max(MAX_ZOOM, Math.min(24, p.whiteMax | 0));
+                }
+            } catch (e) {}
+        }
+        function saveZoomRange(min, max, whiteMax) {
+            MIN_ZOOM = Math.max(0, Math.min(24, min | 0));
+            MAX_ZOOM = Math.max(MIN_ZOOM + 1, Math.min(24, max | 0));
+            WHITE_BG_MAX_ZOOM = Math.max(MAX_ZOOM, Math.min(24, whiteMax | 0));
+            try { localStorage.setItem(ZOOM_RANGE_STORAGE_KEY, JSON.stringify({ min: MIN_ZOOM, max: MAX_ZOOM, whiteMax: WHITE_BG_MAX_ZOOM })); } catch (e) {}
+            // 立即应用到现有地图实例与瓦片层
+            if (map) {
+                map.setMinZoom(MIN_ZOOM);
+                map.setMaxZoom(isWhiteBg ? WHITE_BG_MAX_ZOOM : MAX_ZOOM);
+                const curZoom = map.getZoom();
+                if (curZoom < MIN_ZOOM) map.setZoom(MIN_ZOOM, { animate: false });
+            }
+            if (tileLayer && map && map.hasLayer(tileLayer)) {
+                map.removeLayer(tileLayer);
+                applyRoadmapPath(currentRoadmapPath);
+            }
+        }
+
         function initMap() {
             try {
                 if (typeof L === 'undefined') throw new Error('Leaflet 库未加载（L 未定义）');
-                map = L.map('map', { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, preferCanvas: true, zoomAnimation: true, fadeAnimation: false, markerZoomAnimation: false, zoomControl: false }).setView([30.659, 104.075], 13);
+                loadZoomRange();
+                // 读取保存的默认中心点，若无则使用硬编码默认值
+                let initCenter = [30.659, 104.075], initZoom = 13;
+                try {
+                    const saved = localStorage.getItem(DEFAULT_CENTER_STORAGE_KEY);
+                    if (saved) {
+                        const parsed = JSON.parse(saved);
+                        if (Array.isArray(parsed.center) && parsed.center.length === 2) initCenter = parsed.center;
+                        if (typeof parsed.zoom === 'number') initZoom = parsed.zoom;
+                    }
+                } catch (e) {}
+                map = L.map('map', { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, preferCanvas: true, zoomAnimation: true, fadeAnimation: false, markerZoomAnimation: false, zoomControl: false }).setView(initCenter, initZoom);
                 window.map = map;
                 L.control.zoom({ position: 'topright' }).addTo(map);
                 map.doubleClickZoom.disable();
@@ -1756,6 +1811,7 @@
         function toggleWhiteBg() {
             if (!tileLayer) { alert('请先配置电子地图文件夹后再使用白底功能。'); return; }
             isWhiteBg = !isWhiteBg;
+            map.setMaxZoom(isWhiteBg ? WHITE_BG_MAX_ZOOM : MAX_ZOOM);
             const wrapper = DOM.mapWrapper || (DOM.mapWrapper = document.getElementById('map-wrapper'));
             if (isWhiteBg) {
                 if (tileLayer && map.hasLayer(tileLayer)) map.removeLayer(tileLayer);
@@ -4036,6 +4092,58 @@
             on('mapPathBtn', 'click', function() { showPathConfigDialog('map', '重新配置电子地图文件夹：'); });
             on('docPathBtn', 'click', function() { showPathConfigDialog('doc', '重新配置文档存储文件夹：'); });
             on('selectFileBtn', 'click', onSelectFileClick);
+            on('setDefaultCenterBtn', 'click', function() {
+                if (!isSuperAdmin) { alert('仅超级管理员可设置默认地图中心点'); return; }
+                if (!map) { alert('地图尚未初始化'); return; }
+                const center = map.getCenter();
+                const zoom = map.getZoom();
+                const data = { center: [center.lat, center.lng], zoom: zoom };
+                try {
+                    localStorage.setItem(DEFAULT_CENTER_STORAGE_KEY, JSON.stringify(data));
+                    alert('默认地图中心点已设置！\n纬度: ' + center.lat.toFixed(6) + '\n经度: ' + center.lng.toFixed(6) + '\n缩放级别: ' + zoom + '\n\n下次启动地图将以此为中心显示。');
+                } catch (e) {
+                    alert('保存失败: ' + e.message);
+                }
+            });
+
+            // ==================== 缩放范围配置对话框 ====================
+            const zoomOverlay = document.getElementById('zoomRangeOverlay');
+            const zoomMinInput = document.getElementById('zoomMinInput');
+            const zoomMaxInput = document.getElementById('zoomMaxInput');
+            const zoomWhiteMaxInput = document.getElementById('zoomWhiteMaxInput');
+            function openZoomRangeDialog() {
+                if (!isSuperAdmin) { alert('仅超级管理员可配置缩放范围'); return; }
+                zoomMinInput.value = MIN_ZOOM;
+                zoomMaxInput.value = MAX_ZOOM;
+                zoomWhiteMaxInput.value = WHITE_BG_MAX_ZOOM;
+                zoomOverlay.classList.add('show');
+            }
+            function closeZoomRangeDialog() { zoomOverlay.classList.remove('show'); }
+            function validateAndSaveZoomRange() {
+                const min = parseInt(zoomMinInput.value, 10);
+                const max = parseInt(zoomMaxInput.value, 10);
+                const whiteMax = parseInt(zoomWhiteMaxInput.value, 10);
+                if (isNaN(min) || isNaN(max) || isNaN(whiteMax)) { alert('请输入有效的整数'); return false; }
+                if (min < 0 || min > 24) { alert('最小缩放需在 0~24 之间'); return false; }
+                if (max < 1 || max > 24) { alert('最大缩放需在 1~24 之间'); return false; }
+                if (whiteMax < 1 || whiteMax > 24) { alert('白底模式最大需在 1~24 之间'); return false; }
+                if (min >= max) { alert('最小缩放必须小于最大缩放'); return false; }
+                if (max > whiteMax) { alert('白底模式最大不能小于最大缩放'); return false; }
+                saveZoomRange(min, max, whiteMax);
+                alert('缩放范围已保存并立即生效！\n最小=' + MIN_ZOOM + '  最大=' + MAX_ZOOM + '  白底最大=' + WHITE_BG_MAX_ZOOM);
+                return true;
+            }
+            on('zoomRangeBtn', 'click', openZoomRangeDialog);
+            on('zoomRangeCancel', 'click', closeZoomRangeDialog);
+            on('zoomRangeConfirm', 'click', function() {
+                if (validateAndSaveZoomRange()) closeZoomRangeDialog();
+            });
+            on('zoomRangeReset', 'click', function() {
+                if (!confirm('确定恢复默认缩放范围吗？\n最小=7  最大=18  白底最大=20')) return;
+                saveZoomRange(DEFAULT_MIN_ZOOM, DEFAULT_MAX_ZOOM, DEFAULT_WHITE_BG_MAX_ZOOM);
+                alert('已恢复默认值并生效！');
+                closeZoomRangeDialog();
+            });
             on('fileInput', 'change', async function(e) {
                 const file = e.target.files[0];
                 e.target.value = '';
@@ -4311,7 +4419,7 @@
 
         // ==================== 超级管理员可见性 ====================
         function applyAdminVisibility() {
-            const ids = ['mapPathBtn', 'docPathBtn', 'selectFileBtn'];
+            const ids = ['mapPathBtn', 'docPathBtn', 'selectFileBtn', 'setDefaultCenterBtn', 'zoomRangeBtn'];
             ids.forEach(function(id) { const el = document.getElementById(id); if (el) el.style.display = isSuperAdmin ? '' : 'none'; });
         }
 
@@ -4346,5 +4454,5 @@
             try { showLoginBeforeApp(); } catch (e) { const el = document.getElementById('bootError'), msgEl = document.getElementById('bootErrorMsg'); if (el && msgEl) { msgEl.textContent = '启动失败：' + e.message + '\n' + (e.stack || ''); el.classList.add('show'); } }
         }
     </script>
-</body>
-</html>
+
+</body></html>
